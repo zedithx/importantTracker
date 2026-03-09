@@ -36,6 +36,19 @@ curl -X POST http://localhost:8080/v1/captures \
   }'
 ```
 
+Create capture from screenshot payload:
+```bash
+curl -X POST http://localhost:8080/v1/captures \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "user_id":"u_1",
+    "image_base64":"<base64_without_data_url_prefix>",
+    "tag_hint":"exam",
+    "source_app":"desktop",
+    "source_title":"Quick Capture"
+  }'
+```
+
 Ask question:
 ```bash
 curl -X POST http://localhost:8080/v1/query \
@@ -48,5 +61,5 @@ curl -X POST http://localhost:8080/v1/query \
 
 ## Notes
 - Store is in-memory for MVP.
-- OCR is expected from the desktop client for now.
+- Supports either `ocr_text` or `image_base64`.
 - Keep secrets in `.env` only.

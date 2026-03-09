@@ -1,0 +1,14 @@
+# Secrets
+.env
+*.env.local
+
+# Go
+backend/data/
+*.test
+
+# Node/Electron
+desktop/node_modules/
+desktop/dist/
+
+# OS
+.DS_Store

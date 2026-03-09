@@ -23,7 +23,7 @@ Out of scope:
 
 ## 4) User Flow
 1. User hits shortcut or clicks sticky button.
-2. Desktop app captures selected region and sends OCR text (and later image) to backend.
+2. Desktop app captures selected region and sends OCR text and/or image to backend.
 3. Backend extracts summary + fields + confidence.
 4. Backend stores record and pushes summary to Telegram chat.
 5. User asks Telegram: "What time is my exam and where?"
@@ -36,6 +36,7 @@ Request:
 {
   "user_id": "u_123",
   "ocr_text": "Exam: CS2040 on 12 Apr 2026 09:00 at LT19",
+  "image_base64": "<optional screenshot base64>",
   "tag_hint": "exam",
   "source_app": "chrome",
   "source_title": "NUS exam schedule",
