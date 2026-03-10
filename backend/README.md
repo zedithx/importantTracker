@@ -16,7 +16,7 @@ Fill in:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_API_BASE_URL` (optional, defaults to Telegram official API)
 - `TELEGRAM_DEFAULT_CHAT_ID` (optional fallback)
-- `POSTGRES_DSN` or `DATABASE_URL` (optional now, for Postgres store)
+- `POSTGRES_DSN` or `DATABASE_URL` (required for persistent storage)
 
 Supabase DSN format example:
 `postgresql://postgres.<project-ref>:<password>@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require`
@@ -77,6 +77,7 @@ curl -X POST http://localhost:8080/v1/query \
 ```
 
 ## Notes
-- Store is in-memory for MVP.
+- If `POSTGRES_DSN`/`DATABASE_URL` is set, backend auto-runs migrations and persists captures/linking data in Postgres.
+- If no Postgres DSN is set, backend falls back to in-memory store.
 - Supports either `ocr_text` or `image_base64`.
 - Keep secrets in `.env` only.

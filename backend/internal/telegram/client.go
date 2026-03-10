@@ -52,13 +52,7 @@ func (c *Client) SendCaptureSummary(ctx context.Context, chatID string, record m
 	if tag == "event" {
 		message = fmt.Sprintf("Added to [event] Tag\n%s", record.Summary)
 	} else {
-		message = fmt.Sprintf(
-			"Saved [%s]\n%s\nSource: %s\nCaptured: %s",
-			record.Tag,
-			record.Summary,
-			record.Source.Title,
-			record.CapturedAt.Format("2006-01-02 15:04 MST"),
-		)
+		message = fmt.Sprintf("Saved [%s]\n%s", record.Tag, record.Summary)
 	}
 
 	return c.SendTextMessage(ctx, chatID, message)

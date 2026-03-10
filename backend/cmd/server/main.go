@@ -24,7 +24,11 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	captureStore := store.NewMemoryStore()
+	captureStore, cleanupStore := initCaptureStore(cfg)
+	if cleanupStore != nil {
+		defer cleanupStore()
+	}
+
 	aiClient := ai.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIBaseURL, cfg.RequestTimeout)
 	tgClient := telegram.NewClient(cfg.TelegramBotToken, cfg.TelegramAPIBaseURL, cfg.RequestTimeout)
 	svc := service.New(aiClient, captureStore, tgClient, cfg.TelegramDefaultChatID)
@@ -159,6 +163,35 @@ func main() {
 	log.Printf("SnapRecall backend running on %s", addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server failed: %v", err)
+	}
+}
+
+func initCaptureStore(cfg *config.Config) (service.CaptureStore, func()) {
+	dsn := strings.TrimSpace(cfg.PostgresDSN)
+	if dsn == "" {
+		log.Printf("storage: using in-memory store")
+		return store.NewMemoryStore(), nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pgStore, err := store.NewPostgresStore(
+		ctx,
+		dsn,
+		cfg.PostgresMaxOpenConns,
+		cfg.PostgresMaxIdleConns,
+		cfg.PostgresConnMaxLife,
+	)
+	if err != nil {
+		log.Fatalf("storage: failed to initialize postgres store: %v", err)
+	}
+
+	log.Printf("storage: using postgres store")
+	return pgStore, func() {
+		if err := pgStore.Close(); err != nil {
+			log.Printf("storage: close postgres store failed: %v", err)
+		}
 	}
 }
 

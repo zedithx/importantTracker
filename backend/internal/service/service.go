@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"importanttracker/backend/internal/ai"
@@ -21,7 +22,7 @@ type Analyzer interface {
 }
 
 type CaptureStore interface {
-	SaveCapture(record model.CaptureRecord)
+	SaveCapture(record model.CaptureRecord) error
 	ListCaptures(userID string, limit int) []model.CaptureRecord
 	GetCapture(id string) (model.CaptureRecord, bool)
 	CreateTelegramLink(link model.TelegramLinkStatus) error
@@ -40,6 +41,8 @@ type Service struct {
 	store         CaptureStore
 	notifier      TelegramNotifier
 	defaultChatID string
+	notifyMu      sync.Mutex
+	notifySeen    map[string]time.Time
 }
 
 func New(analyzer Analyzer, store CaptureStore, notifier TelegramNotifier, defaultChatID string) *Service {
@@ -48,6 +51,7 @@ func New(analyzer Analyzer, store CaptureStore, notifier TelegramNotifier, defau
 		store:         store,
 		notifier:      notifier,
 		defaultChatID: defaultChatID,
+		notifySeen:    make(map[string]time.Time),
 	}
 }
 
@@ -83,7 +87,9 @@ func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (mo
 		Fields:  analysis.Fields,
 	}
 
-	s.store.SaveCapture(record)
+	if err := s.store.SaveCapture(record); err != nil {
+		return model.CaptureRecord{}, "", fmt.Errorf("save capture: %w", err)
+	}
 
 	chatID := strings.TrimSpace(in.ChatID)
 	if chatID == "" {
@@ -96,8 +102,10 @@ func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (mo
 	}
 
 	warning := ""
-	if err := s.notifier.SendCaptureSummary(ctx, chatID, record); err != nil {
-		warning = "capture was saved but Telegram notification failed"
+	if s.shouldSendCaptureNotification(chatID, record) {
+		if err := s.notifier.SendCaptureSummary(ctx, chatID, record); err != nil {
+			warning = "capture was saved but Telegram notification failed"
+		}
 	}
 
 	return record, warning, nil
@@ -256,4 +264,30 @@ func generateTelegramEventID() string {
 		return fmt.Sprintf("EVT-%06d", time.Now().UnixNano()%1000000)
 	}
 	return "EVT-" + strings.ToUpper(hex.EncodeToString(buf))
+}
+
+func (s *Service) shouldSendCaptureNotification(chatID string, record model.CaptureRecord) bool {
+	if strings.TrimSpace(chatID) == "" {
+		return false
+	}
+
+	key := strings.ToLower(strings.TrimSpace(chatID)) + "|" + strings.ToLower(strings.TrimSpace(record.Tag)) + "|" + strings.TrimSpace(record.Summary)
+	now := time.Now().UTC()
+
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+
+	// Keep memory bounded by dropping stale entries.
+	for k, t := range s.notifySeen {
+		if now.Sub(t) > 2*time.Minute {
+			delete(s.notifySeen, k)
+		}
+	}
+
+	if last, ok := s.notifySeen[key]; ok && now.Sub(last) <= 15*time.Second {
+		return false
+	}
+
+	s.notifySeen[key] = now
+	return true
 }

@@ -27,12 +27,13 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-func (s *MemoryStore) SaveCapture(record model.CaptureRecord) {
+func (s *MemoryStore) SaveCapture(record model.CaptureRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.byID[record.ID] = record
 	s.byUser[record.UserID] = append(s.byUser[record.UserID], record)
+	return nil
 }
 
 func (s *MemoryStore) ListCaptures(userID string, limit int) []model.CaptureRecord {
