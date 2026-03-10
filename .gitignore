@@ -12,3 +12,5 @@ desktop/dist/
 
 # OS
 .DS_Store
+
+.history

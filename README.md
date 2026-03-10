@@ -20,7 +20,6 @@ Recommended: **Electron + React**
 ```bash
 cp .env.example .env
 cd backend
-set -a; source ../.env; set +a
 go run ./cmd/server
 ```
 2. Start desktop app:

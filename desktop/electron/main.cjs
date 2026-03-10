@@ -1,3 +1,4 @@
+const fs = require('node:fs')
 const path = require('node:path')
 const {
   app,
@@ -7,14 +8,133 @@ const {
   ipcMain,
   screen
 } = require('electron')
+
 require('dotenv').config({ path: path.join(__dirname, '../.env') })
 
 const isDev = !app.isPackaged
 const rendererURL = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173'
-const captureShortcut =
+const defaultCaptureShortcut =
   process.env.CAPTURE_SHORTCUT || 'CommandOrControl+Shift+S'
 
 let mainWindow = null
+let captureShortcut = defaultCaptureShortcut
+
+function getSettingsPath() {
+  return path.join(app.getPath('userData'), 'snaprecall-settings.json')
+}
+
+function loadCaptureShortcut() {
+  try {
+    const raw = fs.readFileSync(getSettingsPath(), 'utf8')
+    const parsed = JSON.parse(raw)
+
+    if (
+      parsed &&
+      typeof parsed.captureShortcut === 'string' &&
+      parsed.captureShortcut.trim() !== ''
+    ) {
+      return parsed.captureShortcut.trim()
+    }
+  } catch (_err) {
+    return defaultCaptureShortcut
+  }
+
+  return defaultCaptureShortcut
+}
+
+function saveCaptureShortcut(shortcutValue) {
+  try {
+    fs.writeFileSync(
+      getSettingsPath(),
+      JSON.stringify({ captureShortcut: shortcutValue }, null, 2),
+      'utf8'
+    )
+  } catch (err) {
+    console.error('Failed to persist shortcut settings:', err)
+  }
+}
+
+function focusMainWindow() {
+  if (!mainWindow) {
+    return
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  if (!mainWindow.isVisible()) {
+    mainWindow.show()
+  }
+
+  mainWindow.focus()
+}
+
+function triggerCapture(shortcutValue) {
+  if (!mainWindow) {
+    return
+  }
+
+  focusMainWindow()
+  mainWindow.webContents.send('shortcut:capture', { shortcut: shortcutValue })
+}
+
+function registerCaptureShortcut(shortcutValue) {
+  const nextShortcut = String(shortcutValue || '').trim()
+  if (!nextShortcut) {
+    return {
+      ok: false,
+      error: 'Shortcut cannot be empty.'
+    }
+  }
+
+  if (
+    nextShortcut === captureShortcut &&
+    globalShortcut.isRegistered(nextShortcut)
+  ) {
+    return {
+      ok: true,
+      shortcut: nextShortcut
+    }
+  }
+
+  const previousShortcut = captureShortcut
+  if (previousShortcut) {
+    globalShortcut.unregister(previousShortcut)
+  }
+
+  const registered = globalShortcut.register(nextShortcut, () => {
+    triggerCapture(nextShortcut)
+  })
+
+  if (!registered) {
+    if (previousShortcut && previousShortcut !== nextShortcut) {
+      const restored = globalShortcut.register(previousShortcut, () => {
+        triggerCapture(previousShortcut)
+      })
+      if (restored) {
+        captureShortcut = previousShortcut
+      }
+    }
+
+    return {
+      ok: false,
+      error: `Failed to register shortcut: ${nextShortcut}`
+    }
+  }
+
+  captureShortcut = nextShortcut
+  return {
+    ok: true,
+    shortcut: captureShortcut
+  }
+}
+
+function registerShortcuts() {
+  const result = registerCaptureShortcut(captureShortcut)
+  if (!result.ok) {
+    console.error(result.error)
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -60,29 +180,9 @@ async function capturePrimaryDisplay() {
   return target.thumbnail.toDataURL()
 }
 
-function registerShortcuts() {
-  const ok = globalShortcut.register(captureShortcut, () => {
-    if (!mainWindow) {
-      return
-    }
-
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore()
-    }
-    if (!mainWindow.isVisible()) {
-      mainWindow.show()
-    }
-
-    mainWindow.focus()
-    mainWindow.webContents.send('shortcut:capture', { shortcut: captureShortcut })
-  })
-
-  if (!ok) {
-    console.error(`Failed to register shortcut: ${captureShortcut}`)
-  }
-}
-
 app.whenReady().then(() => {
+  captureShortcut = loadCaptureShortcut()
+
   createWindow()
   registerShortcuts()
 
@@ -94,6 +194,20 @@ app.whenReady().then(() => {
     return {
       captureShortcut
     }
+  })
+
+  ipcMain.handle('shortcut:update', async (_event, nextShortcut) => {
+    const result = registerCaptureShortcut(nextShortcut)
+    if (result.ok) {
+      saveCaptureShortcut(result.shortcut)
+      if (mainWindow) {
+        mainWindow.webContents.send('shortcut:updated', {
+          shortcut: result.shortcut
+        })
+      }
+    }
+
+    return result
   })
 
   app.on('activate', () => {

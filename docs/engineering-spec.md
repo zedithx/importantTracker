@@ -39,8 +39,7 @@ Request:
   "image_base64": "<optional screenshot base64>",
   "tag_hint": "exam",
   "source_app": "chrome",
-  "source_title": "NUS exam schedule",
-  "chat_id": "123456789"
+  "source_title": "NUS exam schedule"
 }
 ```
 Response:
@@ -81,11 +80,39 @@ Response:
 {"ok": true}
 ```
 
+### POST `/v1/integrations/telegram/start`
+Request:
+```json
+{
+  "user_id": "u_123"
+}
+```
+Response:
+```json
+{
+  "event_id": "EVT-12AB34",
+  "user_id": "u_123",
+  "status": "pending",
+  "bot_username": "your_snaprecall_bot"
+}
+```
+
+### GET `/v1/integrations/telegram/status?event_id=EVT-12AB34`
+Response:
+```json
+{
+  "event_id": "EVT-12AB34",
+  "user_id": "u_123",
+  "status": "linked",
+  "chat_id": "123456789",
+  "created_at": "2026-03-10T02:00:00Z",
+  "linked_at": "2026-03-10T02:01:10Z"
+}
+```
+
 ## 6) Telegram Commands (MVP)
-- `/latest` -> show latest saved capture summary.
+- `<question>` -> factual Q&A from saved captures (plain text).
 - `/ask <question>` -> factual Q&A from saved captures.
-- `/search <keyword>` -> return top matching captures.
-- `/help` -> show command list.
 
 ## 7) JSON Schema (Core Record)
 ```json

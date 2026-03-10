@@ -1,9 +1,10 @@
 # SnapRecall Desktop (Electron + React)
 
 ## What this MVP does
-- Global shortcut triggers quick screen capture.
-- Capture can also come from clipboard paste or file upload.
-- Sends image/OCR text to backend `/v1/captures`.
+- Uses backend `http://localhost:8080` by default.
+- Global shortcut triggers quick capture and save.
+- Telegram integration uses one button that generates an event ID.
+- User starts the Telegram bot, sends the event ID, and the app auto-detects link status.
 - Supports Q&A through backend `/v1/query`.
 
 ## 1) Install
@@ -17,14 +18,14 @@ npm install
 cp .env.example .env
 ```
 
-Default values:
-- `VITE_BACKEND_URL=http://localhost:8080`
+Default value:
 - `CAPTURE_SHORTCUT=CommandOrControl+Shift+S`
+
+You can still override shortcut at runtime in the app; UI-saved value takes precedence after first save.
 
 ## 3) Run dev mode
 ```bash
 cd desktop
-set -a; source .env; set +a
 npm run dev
 ```
 
