@@ -101,6 +101,66 @@ func TestProcessCapture_DedupesRapidTelegramNotification(t *testing.T) {
 	}
 }
 
+func TestDeleteCapture_RemovesOwnedRecord(t *testing.T) {
+	mem := store.NewMemoryStore()
+	svc := New(
+		stubAnalyzer{
+			analysis: ai.CaptureAnalysis{
+				Summary: "Exam at 9:00 AM",
+				Tag:     "exam",
+				Fields:  []model.Field{{Type: "time", Value: "9:00 AM", Confidence: 0.9}},
+				OCRText: "Exam at 9:00 AM",
+			},
+		},
+		mem,
+		&countingNotifier{},
+		"",
+	)
+
+	first, _, err := svc.ProcessCapture(context.Background(), model.CaptureInput{
+		UserID:  "u_delete",
+		OCRText: "Exam at 9:00 AM",
+	})
+	if err != nil {
+		t.Fatalf("first ProcessCapture returned error: %v", err)
+	}
+
+	second, _, err := svc.ProcessCapture(context.Background(), model.CaptureInput{
+		UserID:  "u_delete",
+		OCRText: "Exam at 10:00 AM",
+	})
+	if err != nil {
+		t.Fatalf("second ProcessCapture returned error: %v", err)
+	}
+
+	deleted, err := svc.DeleteCapture("u_delete", first.ID)
+	if err != nil {
+		t.Fatalf("DeleteCapture returned error: %v", err)
+	}
+	if !deleted {
+		t.Fatalf("expected capture to be deleted")
+	}
+
+	records, err := svc.ListRecentCaptures("u_delete", 10)
+	if err != nil {
+		t.Fatalf("ListRecentCaptures returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected one capture after delete, got %d", len(records))
+	}
+	if records[0].ID != second.ID {
+		t.Fatalf("expected remaining capture %q, got %q", second.ID, records[0].ID)
+	}
+
+	deleted, err = svc.DeleteCapture("another_user", second.ID)
+	if err != nil {
+		t.Fatalf("DeleteCapture for non-owner returned error: %v", err)
+	}
+	if deleted {
+		t.Fatalf("expected non-owner delete to fail")
+	}
+}
+
 func TestRegisterAuthenticateAndLoadUserProfile(t *testing.T) {
 	svc := New(
 		stubAnalyzer{},

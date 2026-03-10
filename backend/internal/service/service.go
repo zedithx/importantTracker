@@ -26,6 +26,7 @@ type CaptureStore interface {
 	SaveCapture(record model.CaptureRecord) error
 	ListCaptures(userID string, limit int) []model.CaptureRecord
 	GetCapture(id string) (model.CaptureRecord, bool)
+	DeleteCapture(userID, captureID string) (bool, error)
 	CreateTelegramLink(link model.TelegramLinkStatus) error
 	GetTelegramLink(eventID string) (model.TelegramLinkStatus, bool)
 	ClaimTelegramLink(eventID, chatID string, linkedAt time.Time) (model.TelegramLinkStatus, bool)
@@ -223,6 +224,42 @@ func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (mode
 	}
 
 	return answer, nil
+}
+
+func (s *Service) ListRecentCaptures(userID string, limit int) ([]model.CaptureRecord, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	records := s.store.ListCaptures(userID, limit)
+	return records, nil
+}
+
+func (s *Service) DeleteCapture(userID, captureID string) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false, fmt.Errorf("user_id is required")
+	}
+
+	captureID = strings.TrimSpace(captureID)
+	if captureID == "" {
+		return false, fmt.Errorf("capture_id is required")
+	}
+
+	deleted, err := s.store.DeleteCapture(userID, captureID)
+	if err != nil {
+		return false, fmt.Errorf("delete capture: %w", err)
+	}
+
+	return deleted, nil
 }
 
 func (s *Service) StartTelegramLink(userID string) (model.TelegramLinkStatus, error) {

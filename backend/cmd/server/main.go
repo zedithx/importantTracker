@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -187,6 +188,73 @@ func main() {
 		}
 
 		writeJSON(w, http.StatusOK, resp)
+	})
+
+	mux.HandleFunc("/v1/captures/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
+		captureID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/v1/captures/"))
+		if captureID == "" || strings.Contains(captureID, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid capture id"})
+			return
+		}
+
+		deleted, err := svc.DeleteCapture(claims.UserID, captureID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if !deleted {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "capture not found"})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"deleted":    true,
+			"capture_id": captureID,
+		})
+	})
+
+	mux.HandleFunc("/v1/captures/recent", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
+		limit := 20
+		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+			parsed, parseErr := strconv.Atoi(rawLimit)
+			if parseErr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid limit"})
+				return
+			}
+			limit = parsed
+		}
+
+		records, err := svc.ListRecentCaptures(claims.UserID, limit)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"captures": records,
+		})
 	})
 
 	mux.HandleFunc("/v1/query", func(w http.ResponseWriter, r *http.Request) {

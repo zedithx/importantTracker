@@ -230,6 +230,26 @@ func (s *PostgresStore) GetCapture(id string) (model.CaptureRecord, bool) {
 	return captureRowToModel(row), true
 }
 
+func (s *PostgresStore) DeleteCapture(userID, captureID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
+	defer cancel()
+
+	userID = strings.TrimSpace(userID)
+	captureID = strings.TrimSpace(captureID)
+	if userID == "" || captureID == "" {
+		return false, nil
+	}
+
+	tx := s.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", captureID, userID).
+		Delete(&captureRow{})
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+
+	return tx.RowsAffected > 0, nil
+}
+
 func (s *PostgresStore) CreateTelegramLink(link model.TelegramLinkStatus) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()

@@ -4,6 +4,7 @@
 
 # Go
 backend/data/
+backend/.gocache/
 *.test
 
 # Node/Electron

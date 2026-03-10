@@ -69,6 +69,40 @@ func (s *MemoryStore) GetCapture(id string) (model.CaptureRecord, bool) {
 	return record, ok
 }
 
+func (s *MemoryStore) DeleteCapture(userID, captureID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	userID = strings.TrimSpace(userID)
+	captureID = strings.TrimSpace(captureID)
+	if userID == "" || captureID == "" {
+		return false, nil
+	}
+
+	record, ok := s.byID[captureID]
+	if !ok || record.UserID != userID {
+		return false, nil
+	}
+
+	delete(s.byID, captureID)
+
+	records := s.byUser[userID]
+	filtered := make([]model.CaptureRecord, 0, len(records))
+	for _, item := range records {
+		if item.ID != captureID {
+			filtered = append(filtered, item)
+		}
+	}
+
+	if len(filtered) == 0 {
+		delete(s.byUser, userID)
+	} else {
+		s.byUser[userID] = filtered
+	}
+
+	return true, nil
+}
+
 func (s *MemoryStore) CreateTelegramLink(link model.TelegramLinkStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -80,3 +80,25 @@ Use this file to record each bug in a consistent format.
 - **Status:** Resolved
 - **Owner:** Codex
 - **Notes:** Also cleaned `desktop/README.md` conflict artifacts to prevent future confusion.
+
+## Bug 007
+- **Date:** 2026-03-10
+- **Bug/Error:** `npm run lint` failed after the UI rewrite with `imageDataURL` unused and a missing `captureAndSave` hook dependency warning.
+- **Impact:** Frontend quality gate was blocked; release confidence dropped because shortcut listener could capture stale callback logic.
+- **Reproduction Steps:** Run `cd desktop && npm run lint` after applying the redesigned `App.jsx`.
+- **Root Cause:** Capture preview state was set but never rendered, and the Electron shortcut `useEffect` referenced `captureAndSave` without listing it in dependencies.
+- **Resolution Method:** Rendered live capture preview in the capture details panel, moved `captureAndSave` to a stable `useCallback` position, and updated effect deps to include `captureAndSave`.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Verified by running `npm run lint` and `npm run build` successfully.
+
+## Bug 008
+- **Date:** 2026-03-10
+- **Bug/Error:** Telegram polling logs `telegram getUpdates failed with status 409` when more than one backend instance runs with the same bot token.
+- **Impact:** Telegram link/check updates can fail on one instance; noisy logs and unreliable bot behavior in multi-instance local runs.
+- **Reproduction Steps:** Start one backend instance, then start another backend instance using the same `.env` `TELEGRAM_BOT_TOKEN`.
+- **Root Cause:** Telegram `getUpdates` long-poll API allows only one active consumer per bot token.
+- **Resolution Method:** Run a single polling backend per bot token (or move to webhook mode for scaled deployment).
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Observed during local smoke test on a second API port while another backend process was already active.
