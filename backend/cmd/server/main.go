@@ -155,17 +155,18 @@ func main() {
 			return
 		}
 
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
 		var in model.CaptureInput
 		if err := decodeJSON(r, &in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if claims, err := optionalAuthClaims(r, authManager); err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-			return
-		} else if claims != nil {
-			in.UserID = claims.UserID
-		}
+		in.UserID = claims.UserID
 
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
 		defer cancel()
@@ -263,17 +264,18 @@ func main() {
 			return
 		}
 
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
 		var in model.QueryInput
 		if err := decodeJSON(r, &in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if claims, err := optionalAuthClaims(r, authManager); err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-			return
-		} else if claims != nil {
-			in.UserID = claims.UserID
-		}
+		in.UserID = claims.UserID
 
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
 		defer cancel()
@@ -293,17 +295,18 @@ func main() {
 			return
 		}
 
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
 		var in model.TelegramLinkStartInput
 		if err := decodeJSON(r, &in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if claims, err := optionalAuthClaims(r, authManager); err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-			return
-		} else if claims != nil {
-			in.UserID = claims.UserID
-		}
+		in.UserID = claims.UserID
 
 		link, err := svc.StartTelegramLink(in.UserID)
 		if err != nil {
@@ -341,14 +344,45 @@ func main() {
 		writeJSON(w, http.StatusOK, status)
 	})
 
+	mux.HandleFunc("/v1/integrations/telegram/disconnect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
+		disconnected, err := svc.DisconnectTelegramIntegration(claims.UserID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"disconnected": disconnected,
+			"user_id":      claims.UserID,
+			"status":       "not_linked",
+		})
+	})
+
 	mux.HandleFunc("/v1/integrations/telegram/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
 
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
 		eventID := r.URL.Query().Get("event_id")
-		link, err := svc.GetTelegramLinkStatus(eventID)
+		link, err := svc.GetTelegramLinkStatus(claims.UserID, eventID)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 			return
@@ -467,7 +501,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
 
 		if r.Method == http.MethodOptions {

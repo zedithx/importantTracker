@@ -17,6 +17,8 @@ import (
 
 var telegramEventPattern = regexp.MustCompile(`EVT-[A-Z0-9]{6}`)
 
+const telegramLinkEventTTL = 10 * time.Minute
+
 type Analyzer interface {
 	AnalyzeCapture(ctx context.Context, ocrText, imageBase64, tagHint string) (ai.CaptureAnalysis, error)
 	AnswerQuestion(ctx context.Context, question string, captures []model.CaptureRecord) (model.QueryAnswer, error)
@@ -32,6 +34,7 @@ type CaptureStore interface {
 	ClaimTelegramLink(eventID, chatID string, linkedAt time.Time) (model.TelegramLinkStatus, bool)
 	GetTelegramChatIDByUser(userID string) (string, bool)
 	GetUserIDByTelegramChatID(chatID string) (string, bool)
+	DeleteTelegramChatLinkByUser(userID string) (bool, error)
 	CreateUser(user model.UserAuth) error
 	GetUserByEmail(email string) (model.UserAuth, bool)
 	GetUserByID(userID string) (model.UserAuth, bool)
@@ -314,7 +317,26 @@ func (s *Service) GetTelegramIntegrationStatus(userID string) (model.TelegramInt
 	return status, nil
 }
 
-func (s *Service) GetTelegramLinkStatus(eventID string) (model.TelegramLinkStatus, error) {
+func (s *Service) DisconnectTelegramIntegration(userID string) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false, fmt.Errorf("user_id is required")
+	}
+
+	disconnected, err := s.store.DeleteTelegramChatLinkByUser(userID)
+	if err != nil {
+		return false, fmt.Errorf("disconnect telegram integration: %w", err)
+	}
+
+	return disconnected, nil
+}
+
+func (s *Service) GetTelegramLinkStatus(userID, eventID string) (model.TelegramLinkStatus, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return model.TelegramLinkStatus{}, fmt.Errorf("user_id is required")
+	}
+
 	normalized := normalizeTelegramEventID(eventID)
 	if normalized == "" {
 		return model.TelegramLinkStatus{}, fmt.Errorf("event_id is required")
@@ -324,12 +346,28 @@ func (s *Service) GetTelegramLinkStatus(eventID string) (model.TelegramLinkStatu
 	if !ok {
 		return model.TelegramLinkStatus{}, fmt.Errorf("event_id not found")
 	}
+	if link.UserID != userID {
+		return model.TelegramLinkStatus{}, fmt.Errorf("event_id not found")
+	}
+	if isPendingTelegramLinkExpired(link, time.Now().UTC()) {
+		link.Status = "expired"
+		link.ChatID = ""
+		link.LinkedAt = nil
+	}
 	return link, nil
 }
 
 func (s *Service) TryCompleteTelegramLink(text, chatID string) (model.TelegramLinkStatus, bool) {
 	eventID := extractTelegramEventID(text)
 	if eventID == "" || strings.TrimSpace(chatID) == "" {
+		return model.TelegramLinkStatus{}, false
+	}
+
+	link, exists := s.store.GetTelegramLink(eventID)
+	if !exists {
+		return model.TelegramLinkStatus{}, false
+	}
+	if isPendingTelegramLinkExpired(link, time.Now().UTC()) {
 		return model.TelegramLinkStatus{}, false
 	}
 
@@ -394,6 +432,16 @@ func extractTelegramEventID(text string) string {
 
 func normalizeTelegramEventID(raw string) string {
 	return extractTelegramEventID(raw)
+}
+
+func isPendingTelegramLinkExpired(link model.TelegramLinkStatus, now time.Time) bool {
+	if strings.ToLower(strings.TrimSpace(link.Status)) != "pending" {
+		return false
+	}
+	if link.CreatedAt.IsZero() {
+		return false
+	}
+	return now.UTC().Sub(link.CreatedAt.UTC()) > telegramLinkEventTTL
 }
 
 func generateCaptureID() string {

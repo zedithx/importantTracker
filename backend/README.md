@@ -32,7 +32,7 @@ go run ./cmd/server
 The backend auto-loads `.env` (tries `backend/.env` then `../.env`).
 
 ## 3) Telegram link flow
-1. Desktop calls `POST /v1/integrations/telegram/start` with `user_id`.
+1. Desktop calls `POST /v1/integrations/telegram/start` with auth token.
 2. Backend returns `event_id` (example: `EVT-12AB34`).
 3. User starts Telegram bot and sends that `event_id` message.
 4. Backend polling worker claims link and maps `user_id` -> `chat_id`.
@@ -66,12 +66,17 @@ curl -X POST http://localhost:8080/v1/auth/login \
   }'
 ```
 
+Use the returned token for protected endpoints:
+```bash
+TOKEN="<paste_auth_token_here>"
+```
+
 Create capture:
 ```bash
 curl -X POST http://localhost:8080/v1/captures \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "user_id":"u_1",
     "ocr_text":"Flight SQ321 on 2026-04-12 23:40, booking ref AB12CD",
     "tag_hint":"flight",
     "source_app":"mail",
@@ -83,20 +88,22 @@ Start Telegram link:
 ```bash
 curl -X POST http://localhost:8080/v1/integrations/telegram/start \
   -H 'Content-Type: application/json' \
-  -d '{"user_id":"u_1"}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{}'
 ```
 
 Check Telegram link status:
 ```bash
-curl "http://localhost:8080/v1/integrations/telegram/status?event_id=EVT-12AB34"
+curl "http://localhost:8080/v1/integrations/telegram/status?event_id=EVT-12AB34" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 Ask question:
 ```bash
 curl -X POST http://localhost:8080/v1/query \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "user_id":"u_1",
     "question":"What is my flight booking reference?"
   }'
 ```

@@ -163,6 +163,28 @@ func (s *MemoryStore) GetUserIDByTelegramChatID(chatID string) (string, bool) {
 	return userID, ok
 }
 
+func (s *MemoryStore) DeleteTelegramChatLinkByUser(userID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false, nil
+	}
+
+	chatID, exists := s.telegramChatByUser[userID]
+	if !exists {
+		return false, nil
+	}
+
+	delete(s.telegramChatByUser, userID)
+	if strings.TrimSpace(chatID) != "" {
+		delete(s.telegramUserByChat, chatID)
+	}
+
+	return true, nil
+}
+
 func (s *MemoryStore) CreateUser(user model.UserAuth) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

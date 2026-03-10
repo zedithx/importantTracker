@@ -292,3 +292,40 @@ func TestTelegramLinkAndCaptureUseLinkedChat(t *testing.T) {
 		t.Fatalf("expected reasonable linked_at timestamp, got %v", linkedAt)
 	}
 }
+
+func TestGetTelegramLinkStatus_AppliesOwnershipAndExpiry(t *testing.T) {
+	mem := store.NewMemoryStore()
+	svc := New(
+		stubAnalyzer{},
+		mem,
+		&countingNotifier{},
+		"",
+	)
+
+	expiredLink := model.TelegramLinkStatus{
+		EventID:   "EVT-ABC123",
+		UserID:    "usr_owner",
+		Status:    "pending",
+		CreatedAt: time.Now().UTC().Add(-11 * time.Minute),
+	}
+	if err := mem.CreateTelegramLink(expiredLink); err != nil {
+		t.Fatalf("CreateTelegramLink returned error: %v", err)
+	}
+
+	status, err := svc.GetTelegramLinkStatus("usr_owner", expiredLink.EventID)
+	if err != nil {
+		t.Fatalf("GetTelegramLinkStatus returned error: %v", err)
+	}
+	if status.Status != "expired" {
+		t.Fatalf("expected expired status, got %q", status.Status)
+	}
+
+	if _, ok := svc.TryCompleteTelegramLink(expiredLink.EventID, "chat_456"); ok {
+		t.Fatalf("expected TryCompleteTelegramLink to fail for expired event")
+	}
+
+	_, err = svc.GetTelegramLinkStatus("usr_other", expiredLink.EventID)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "not found") {
+		t.Fatalf("expected not found for non-owner, got %v", err)
+	}
+}

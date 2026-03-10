@@ -102,3 +102,25 @@ Use this file to record each bug in a consistent format.
 - **Status:** Resolved
 - **Owner:** Codex
 - **Notes:** Observed during local smoke test on a second API port while another backend process was already active.
+
+## Bug 009
+- **Date:** 2026-03-11
+- **Bug/Error:** Auth email lookup (`GetUserByEmail`) frequently crossed GORM slow-query threshold (~200ms) against remote Postgres.
+- **Impact:** Login/register flows produced noisy slow-SQL warnings and elevated latency on simple indexed lookups.
+- **Reproduction Steps:** Trigger auth flow against remote Postgres and observe backend logs showing `SLOW SQL >= 200ms` for `SELECT * FROM "users" WHERE email = ? LIMIT 1`.
+- **Root Cause:** Store used default pgx extended protocol, which adds extra network round-trips on high-latency links; logger threshold/no-parameter settings amplified noise and exposed raw query values.
+- **Resolution Method:** Switched GORM Postgres driver to `PreferSimpleProtocol: true`, set parameterized query logging, and raised slow-query threshold to 300ms in store logger config.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** `users.email` already had a unique index; this was not an index-missing issue.
+
+## Bug 010
+- **Date:** 2026-03-11
+- **Bug/Error:** `Delete selected` in desktop captures could report success without removing the item from the visible list, and there was no multi-select delete flow.
+- **Impact:** Users could not reliably confirm deletion in the UI and had to delete captures one-by-one.
+- **Reproduction Steps:** Open desktop captures list, click `Delete selected`, observe list item still shown; no `select all` or per-row batch delete controls.
+- **Root Cause:** Delete flow depended on a refresh path and did not guarantee immediate local state removal. UI only tracked single focused capture, not explicit multi-selection.
+- **Resolution Method:** Added local post-delete state pruning for `recentCaptures`, added per-row checkboxes, `Select all` (filtered view), and batch delete over existing delete endpoint with partial-failure handling.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Batch delete currently sends sequential delete requests to `/v1/captures/:id`.

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -19,9 +21,13 @@ import (
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 )
 
-const defaultStoreTimeout = 10 * time.Second
+const (
+	defaultStoreTimeout     = 10 * time.Second
+	defaultSlowSQLThreshold = 300 * time.Millisecond
+)
 
 //go:embed migrations/*.sql
 var migrationFS embed.FS
@@ -97,7 +103,21 @@ func NewPostgresStore(
 		return nil, err
 	}
 
-	gdb, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{})
+	gdb, err := gorm.Open(
+		gormpostgres.New(gormpostgres.Config{
+			DSN:                  dsn,
+			PreferSimpleProtocol: true,
+		}),
+		&gorm.Config{
+			Logger: gormlogger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), gormlogger.Config{
+				SlowThreshold:             defaultSlowSQLThreshold,
+				LogLevel:                  gormlogger.Warn,
+				IgnoreRecordNotFoundError: true,
+				ParameterizedQueries:      true,
+				Colorful:                  false,
+			}),
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -397,6 +417,25 @@ func (s *PostgresStore) GetUserIDByTelegramChatID(chatID string) (string, bool) 
 	}
 
 	return row.UserID, true
+}
+
+func (s *PostgresStore) DeleteTelegramChatLinkByUser(userID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
+	defer cancel()
+
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false, nil
+	}
+
+	tx := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Delete(&telegramChatLinkRow{})
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+
+	return tx.RowsAffected > 0, nil
 }
 
 func (s *PostgresStore) CreateUser(user model.UserAuth) error {
