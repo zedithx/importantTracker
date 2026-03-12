@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"importanttracker/backend/internal/ai"
+	"importanttracker/backend/internal/logging"
 	"importanttracker/backend/internal/model"
 )
 
@@ -65,15 +67,27 @@ func New(analyzer Analyzer, store CaptureStore, notifier TelegramNotifier, defau
 }
 
 func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (model.CaptureRecord, string, error) {
+	logger := logging.FromContext(ctx).With(
+		slog.String("user_id", strings.TrimSpace(in.UserID)),
+		slog.String("source_app", strings.TrimSpace(in.SourceApp)),
+		slog.String("source_title", strings.TrimSpace(in.SourceTitle)),
+		slog.Bool("has_ocr_text", strings.TrimSpace(in.OCRText) != ""),
+		slog.Bool("has_image", strings.TrimSpace(in.ImageBase64) != ""),
+	)
+	logger.Info("capture_processing_started")
+
 	if strings.TrimSpace(in.UserID) == "" {
+		logger.Warn("capture_processing_rejected", slog.String("reason", "missing_user_id"))
 		return model.CaptureRecord{}, "", fmt.Errorf("user_id is required")
 	}
 	if strings.TrimSpace(in.OCRText) == "" && strings.TrimSpace(in.ImageBase64) == "" {
+		logger.Warn("capture_processing_rejected", slog.String("reason", "missing_capture_payload"))
 		return model.CaptureRecord{}, "", fmt.Errorf("ocr_text or image_base64 is required")
 	}
 
 	analysis, err := s.analyzer.AnalyzeCapture(ctx, in.OCRText, in.ImageBase64, in.TagHint)
 	if err != nil {
+		logger.Error("capture_analysis_failed", slog.String("error", err.Error()))
 		return model.CaptureRecord{}, "", err
 	}
 
@@ -97,8 +111,10 @@ func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (mo
 	}
 
 	if err := s.store.SaveCapture(record); err != nil {
+		logger.Error("capture_save_failed", slog.String("capture_id", record.ID), slog.String("error", err.Error()))
 		return model.CaptureRecord{}, "", fmt.Errorf("save capture: %w", err)
 	}
+	logger.Info("capture_saved", slog.String("capture_id", record.ID), slog.String("tag", record.Tag), slog.Int("field_count", len(record.Fields)))
 
 	chatID := strings.TrimSpace(in.ChatID)
 	if chatID == "" {
@@ -114,7 +130,12 @@ func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (mo
 	if s.shouldSendCaptureNotification(chatID, record) {
 		if err := s.notifier.SendCaptureSummary(ctx, chatID, record); err != nil {
 			warning = "capture was saved but Telegram notification failed"
+			logger.Warn("capture_notification_failed", slog.String("chat_id", logging.MaskChatID(chatID)), slog.String("error", err.Error()))
+		} else {
+			logger.Info("capture_notification_sent", slog.String("chat_id", logging.MaskChatID(chatID)))
 		}
+	} else {
+		logger.Debug("capture_notification_skipped")
 	}
 
 	return record, warning, nil
@@ -122,23 +143,29 @@ func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (mo
 
 func (s *Service) RegisterUser(ctx context.Context, in model.AuthRegisterInput) (model.UserProfile, error) {
 	_ = ctx
+	logger := logging.FromContext(ctx).With(slog.String("email", logging.MaskEmail(in.Email)))
+	logger.Info("auth_register_started")
 
 	email, err := normalizeEmail(in.Email)
 	if err != nil {
+		logger.Warn("auth_register_rejected", slog.String("error", err.Error()))
 		return model.UserProfile{}, err
 	}
 
 	password := in.Password
 	if len(password) < 8 {
+		logger.Warn("auth_register_rejected", slog.String("error", "password_too_short"))
 		return model.UserProfile{}, fmt.Errorf("password must be at least 8 characters")
 	}
 
 	if _, exists := s.store.GetUserByEmail(email); exists {
+		logger.Warn("auth_register_rejected", slog.String("error", "email_already_registered"))
 		return model.UserProfile{}, fmt.Errorf("email already registered")
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
+		logger.Error("auth_register_hash_failed", slog.String("error", err.Error()))
 		return model.UserProfile{}, fmt.Errorf("hash password: %w", err)
 	}
 
@@ -151,60 +178,80 @@ func (s *Service) RegisterUser(ctx context.Context, in model.AuthRegisterInput) 
 	if err := s.store.CreateUser(user); err != nil {
 		errText := strings.ToLower(err.Error())
 		if strings.Contains(errText, "duplicate") || strings.Contains(errText, "unique") {
+			logger.Warn("auth_register_rejected", slog.String("error", "email_already_registered"))
 			return model.UserProfile{}, fmt.Errorf("email already registered")
 		}
+		logger.Error("auth_register_create_failed", slog.String("error", err.Error()))
 		return model.UserProfile{}, fmt.Errorf("create user: %w", err)
 	}
 
+	logger.Info("auth_register_succeeded", slog.String("user_id", user.ID))
 	return toUserProfile(user), nil
 }
 
 func (s *Service) AuthenticateUser(ctx context.Context, in model.AuthLoginInput) (model.UserProfile, error) {
 	_ = ctx
+	logger := logging.FromContext(ctx).With(slog.String("email", logging.MaskEmail(in.Email)))
+	logger.Info("auth_login_started")
 
 	email, err := normalizeEmail(in.Email)
 	if err != nil {
+		logger.Warn("auth_login_rejected", slog.String("error", err.Error()))
 		return model.UserProfile{}, err
 	}
 
 	user, ok := s.store.GetUserByEmail(email)
 	if !ok {
+		logger.Warn("auth_login_rejected", slog.String("error", "invalid_credentials"))
 		return model.UserProfile{}, fmt.Errorf("invalid email or password")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(in.Password)); err != nil {
+		logger.Warn("auth_login_rejected", slog.String("user_id", user.ID), slog.String("error", "invalid_credentials"))
 		return model.UserProfile{}, fmt.Errorf("invalid email or password")
 	}
 
+	logger.Info("auth_login_succeeded", slog.String("user_id", user.ID))
 	return toUserProfile(user), nil
 }
 
 func (s *Service) GetUserProfile(ctx context.Context, userID string) (model.UserProfile, error) {
 	_ = ctx
+	logger := logging.FromContext(ctx).With(slog.String("user_id", strings.TrimSpace(userID)))
 
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
+		logger.Warn("auth_profile_rejected", slog.String("error", "missing_user_id"))
 		return model.UserProfile{}, fmt.Errorf("user_id is required")
 	}
 
 	user, ok := s.store.GetUserByID(userID)
 	if !ok {
+		logger.Warn("auth_profile_not_found")
 		return model.UserProfile{}, fmt.Errorf("user not found")
 	}
 
+	logger.Debug("auth_profile_loaded")
 	return toUserProfile(user), nil
 }
 
 func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (model.QueryAnswer, error) {
+	logger := logging.FromContext(ctx).With(
+		slog.String("user_id", strings.TrimSpace(in.UserID)),
+		slog.String("question", strings.TrimSpace(in.Question)),
+	)
 	if strings.TrimSpace(in.UserID) == "" {
+		logger.Warn("query_rejected", slog.String("reason", "missing_user_id"))
 		return model.QueryAnswer{}, fmt.Errorf("user_id is required")
 	}
 	if strings.TrimSpace(in.Question) == "" {
+		logger.Warn("query_rejected", slog.String("reason", "missing_question"))
 		return model.QueryAnswer{}, fmt.Errorf("question is required")
 	}
 
 	records := s.store.ListCaptures(in.UserID, 30)
 	if len(records) == 0 {
+		logger.Info("query_answered_without_captures")
 		return model.QueryAnswer{
 			Answer:     "I cannot verify this from your saved captures.",
 			Confidence: 0.1,
@@ -218,6 +265,7 @@ func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (mode
 
 	answer, err := s.analyzer.AnswerQuestion(ctx, in.Question, records)
 	if err != nil {
+		logger.Warn("query_answer_fallback", slog.String("error", err.Error()))
 		fallback := records[0]
 		return model.QueryAnswer{
 			Answer:          fmt.Sprintf("I cannot fully verify. Latest relevant capture says: %s (from %s)", fallback.Summary, fallback.CapturedAt.Format(time.RFC3339)),
@@ -234,6 +282,7 @@ func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (mode
 		}
 	}
 
+	logger.Info("query_answered", slog.String("source_capture_id", answer.SourceCaptureID), slog.Float64("confidence", answer.Confidence))
 	return answer, nil
 }
 
@@ -251,6 +300,7 @@ func (s *Service) ListRecentCaptures(userID string, limit int) ([]model.CaptureR
 	}
 
 	records := s.store.ListRecentCaptures(userID, limit)
+	logging.Logger().Debug("captures_recent_loaded", slog.String("user_id", userID), slog.Int("capture_count", len(records)))
 	return records, nil
 }
 
@@ -267,9 +317,11 @@ func (s *Service) DeleteCapture(userID, captureID string) (bool, error) {
 
 	deleted, err := s.store.DeleteCapture(userID, captureID)
 	if err != nil {
+		logging.Logger().Error("capture_delete_failed", slog.String("user_id", userID), slog.String("capture_id", captureID), slog.String("error", err.Error()))
 		return false, fmt.Errorf("delete capture: %w", err)
 	}
 
+	logging.Logger().Info("capture_delete_completed", slog.String("user_id", userID), slog.String("capture_id", captureID), slog.Bool("deleted", deleted))
 	return deleted, nil
 }
 
@@ -279,6 +331,7 @@ func (s *Service) StartTelegramLink(userID string) (model.TelegramLinkStatus, er
 		return model.TelegramLinkStatus{}, fmt.Errorf("user_id is required")
 	}
 	if linkedChatID, linked := s.store.GetTelegramChatIDByUser(userID); linked {
+		logging.Logger().Info("telegram_link_already_connected", slog.String("user_id", userID), slog.String("chat_id", logging.MaskChatID(linkedChatID)))
 		now := time.Now().UTC()
 		return model.TelegramLinkStatus{
 			UserID:    userID,
@@ -299,6 +352,7 @@ func (s *Service) StartTelegramLink(userID string) (model.TelegramLinkStatus, er
 		}
 
 		if err := s.store.CreateTelegramLink(link); err == nil {
+			logging.Logger().Info("telegram_link_created", slog.String("user_id", userID), slog.String("event_id", eventID))
 			return link, nil
 		}
 	}
@@ -322,6 +376,7 @@ func (s *Service) GetTelegramIntegrationStatus(userID string) (model.TelegramInt
 		status.ChatID = chatID
 	}
 
+	logging.Logger().Debug("telegram_integration_status_loaded", slog.String("user_id", userID), slog.String("status", status.Status))
 	return status, nil
 }
 
@@ -333,9 +388,11 @@ func (s *Service) DisconnectTelegramIntegration(userID string) (bool, error) {
 
 	disconnected, err := s.store.DeleteTelegramChatLinkByUser(userID)
 	if err != nil {
+		logging.Logger().Error("telegram_disconnect_failed", slog.String("user_id", userID), slog.String("error", err.Error()))
 		return false, fmt.Errorf("disconnect telegram integration: %w", err)
 	}
 
+	logging.Logger().Info("telegram_disconnect_completed", slog.String("user_id", userID), slog.Bool("disconnected", disconnected))
 	return disconnected, nil
 }
 
@@ -352,9 +409,11 @@ func (s *Service) GetTelegramLinkStatus(userID, eventID string) (model.TelegramL
 
 	link, ok := s.store.GetTelegramLink(normalized)
 	if !ok {
+		logging.Logger().Warn("telegram_link_status_not_found", slog.String("user_id", userID), slog.String("event_id", normalized))
 		return model.TelegramLinkStatus{}, fmt.Errorf("event_id not found")
 	}
 	if link.UserID != userID {
+		logging.Logger().Warn("telegram_link_status_user_mismatch", slog.String("user_id", userID), slog.String("event_id", normalized))
 		return model.TelegramLinkStatus{}, fmt.Errorf("event_id not found")
 	}
 	if isPendingTelegramLinkExpired(link, time.Now().UTC()) {
@@ -384,6 +443,7 @@ func (s *Service) TryCompleteTelegramLink(text, chatID string) (model.TelegramLi
 		return model.TelegramLinkStatus{}, false
 	}
 
+	logging.Logger().Info("telegram_link_claimed", slog.String("event_id", eventID), slog.String("chat_id", logging.MaskChatID(chatID)))
 	return link, true
 }
 
@@ -395,6 +455,7 @@ func (s *Service) HandleTelegramQuestion(ctx context.Context, chatID, text strin
 	}
 
 	if text == "/start" {
+		logging.Logger().Debug("telegram_question_help_requested", slog.String("chat_id", logging.MaskChatID(chatID)))
 		return "Send your question directly after linking, or use /ask <question>.", true
 	}
 
@@ -410,6 +471,7 @@ func (s *Service) HandleTelegramQuestion(ctx context.Context, chatID, text strin
 
 	userID, linked := s.store.GetUserIDByTelegramChatID(chatID)
 	if !linked {
+		logging.Logger().Warn("telegram_question_unlinked_chat", slog.String("chat_id", logging.MaskChatID(chatID)))
 		return "This chat is not linked yet. In desktop app, click Integrate with Telegram and send the generated event ID here.", true
 	}
 
@@ -418,9 +480,11 @@ func (s *Service) HandleTelegramQuestion(ctx context.Context, chatID, text strin
 		Question: question,
 	})
 	if err != nil {
+		logging.Logger().Error("telegram_question_answer_failed", slog.String("user_id", userID), slog.String("chat_id", logging.MaskChatID(chatID)), slog.String("error", err.Error()))
 		return "I could not answer right now. Please try again.", true
 	}
 
+	logging.Logger().Info("telegram_question_answered", slog.String("user_id", userID), slog.String("chat_id", logging.MaskChatID(chatID)))
 	return answer.Answer, true
 }
 

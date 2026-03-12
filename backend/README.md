@@ -32,6 +32,18 @@ go run ./cmd/server
 
 The backend auto-loads `.env` (tries `backend/.env` then `../.env`).
 
+Run only the Postgres migrations:
+```bash
+cd backend
+go run ./cmd/migrate
+```
+
+Or use the shell wrapper:
+```bash
+cd backend
+./scripts/migrate.sh
+```
+
 ## 3) Telegram link flow
 1. Desktop calls `POST /v1/integrations/telegram/start` with auth token.
 2. Backend returns `event_id` (example: `EVT-12AB34`).
@@ -112,6 +124,7 @@ curl -X POST http://localhost:8080/v1/query \
 ## Notes
 - If `POSTGRES_DSN`/`DATABASE_URL` is set, backend auto-runs migrations and persists captures/linking data in Postgres.
 - Postgres persistence uses `gorm` for queries and `golang-migrate` for versioned migrations (`backend/internal/store/migrations`).
+- `DATABASE_URL` is preferred when both `DATABASE_URL` and `POSTGRES_DSN` are present.
 - Auth uses JWT bearer tokens (`Authorization: Bearer <token>`).
 - If no Postgres DSN is set, backend falls back to in-memory store.
 - Supports either `ocr_text` or `image_base64`.

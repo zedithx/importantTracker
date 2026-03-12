@@ -11,6 +11,8 @@ import (
 
 type Config struct {
 	AppEnv                string
+	LogLevel              string
+	LogFormat             string
 	Port                  string
 	RequestTimeout        time.Duration
 	AIRequestTimeout      time.Duration
@@ -31,15 +33,17 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	loadDotEnvIfPresent(".env", "../.env")
+	LoadEnvFilesIfPresent(".env", "../.env")
 
 	cfg := &Config{
 		AppEnv:                getOrDefault("APP_ENV", "development"),
+		LogLevel:              getOrDefault("LOG_LEVEL", "info"),
+		LogFormat:             getOrDefault("LOG_FORMAT", "auto"),
 		Port:                  getOrDefault("APP_PORT", "8080"),
 		RequestTimeout:        time.Duration(getIntOrDefault("REQUEST_TIMEOUT_SECONDS", 20)) * time.Second,
 		AIRequestTimeout:      time.Duration(getIntOrDefault("AI_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,
 		DataDir:               getOrDefault("DATA_DIR", "./data"),
-		PostgresDSN:           getFirstEnv("POSTGRES_DSN", "DATABASE_URL"),
+		PostgresDSN:           getFirstEnv("DATABASE_URL", "POSTGRES_DSN"),
 		PostgresMaxOpenConns:  getIntOrDefault("POSTGRES_MAX_OPEN_CONNS", 10),
 		PostgresMaxIdleConns:  getIntOrDefault("POSTGRES_MAX_IDLE_CONNS", 5),
 		PostgresConnMaxLife:   time.Duration(getIntOrDefault("POSTGRES_CONN_MAX_LIFETIME_MINUTES", 30)) * time.Minute,
@@ -65,6 +69,10 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func LoadEnvFilesIfPresent(paths ...string) {
+	loadDotEnvIfPresent(paths...)
 }
 
 func getOrDefault(key, fallback string) string {

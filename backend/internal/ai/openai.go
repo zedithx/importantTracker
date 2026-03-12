@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"importanttracker/backend/internal/logging"
 	"importanttracker/backend/internal/model"
 )
 
@@ -180,11 +182,22 @@ func (c *OpenAIClient) chatJSON(ctx context.Context, system string, user any, ou
 
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
+		logging.FromContext(ctx).Error("openai_request_build_failed", slog.String("error", err.Error()))
 		return err
 	}
 
+	logger := logging.FromContext(ctx).With(
+		slog.String("provider", "openai"),
+		slog.String("model", c.model),
+		slog.String("endpoint", c.baseURL+"/chat/completions"),
+		slog.Int("payload_bytes", len(payload)),
+	)
+	startedAt := time.Now()
+	logger.Info("openai_request_started")
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
+		logger.Error("openai_request_build_failed", slog.String("error", err.Error()))
 		return err
 	}
 
@@ -193,6 +206,7 @@ func (c *OpenAIClient) chatJSON(ctx context.Context, system string, user any, ou
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
+		logger.Error("openai_request_failed", slog.String("error", err.Error()), slog.Duration("duration", time.Since(startedAt)))
 		if errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("openai request timed out: %w", err)
 		}
@@ -203,6 +217,7 @@ func (c *OpenAIClient) chatJSON(ctx context.Context, system string, user any, ou
 		return err
 	}
 	defer resp.Body.Close()
+	logger.Info("openai_response_received", slog.Int("status", resp.StatusCode), slog.Duration("duration", time.Since(startedAt)))
 
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("openai chat completion failed with status %d", resp.StatusCode)
@@ -217,18 +232,22 @@ func (c *OpenAIClient) chatJSON(ctx context.Context, system string, user any, ou
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		logger.Error("openai_response_decode_failed", slog.String("error", err.Error()))
 		return err
 	}
 
 	if len(parsed.Choices) == 0 {
+		logger.Error("openai_response_empty")
 		return fmt.Errorf("openai returned no choices")
 	}
 
 	content := cleanJSON(extractMessageContent(parsed.Choices[0].Message.Content))
 	if err := json.Unmarshal([]byte(content), out); err != nil {
+		logger.Error("openai_response_parse_failed", slog.String("error", err.Error()))
 		return fmt.Errorf("failed to parse model JSON: %w", err)
 	}
 
+	logger.Info("openai_request_completed", slog.Duration("duration", time.Since(startedAt)))
 	return nil
 }
 

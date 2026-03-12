@@ -146,3 +146,14 @@ Use this file to record each bug in a consistent format.
 - **Status:** Resolved
 - **Owner:** Codex
 - **Notes:** If needed, increase `AI_REQUEST_TIMEOUT_SECONDS` in `.env` for slower networks or larger image payloads.
+
+## Bug 013
+- **Date:** 2026-03-12
+- **Bug/Error:** Desktop app failures were often only written to the slim status bar or logs, so backend connection problems and unexpected renderer errors were easy to miss.
+- **Impact:** Users could trigger capture/auth/recall actions and not receive a clear popup explaining that the backend was unreachable or that the app hit an unexpected error.
+- **Reproduction Steps:** Stop the backend and attempt login/capture/recall from the desktop app, or trigger an uncaught renderer exception.
+- **Root Cause:** Handled async failures updated `status` only, background startup failures could be silent, and there was no shared popup/error-boundary path for unexpected frontend failures.
+- **Resolution Method:** Added a reusable renderer error popup, routed key request failures through it, preserved session state on backend connectivity failures, added global frontend error listeners plus a React error boundary, and surfaced Electron process-level failures with native dialogs.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Popup messaging now distinguishes backend connection issues from general app errors.

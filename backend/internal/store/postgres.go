@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -32,6 +33,9 @@ const (
 	defaultMaxIdleConns     = 5
 	defaultConnMaxLife      = 30 * time.Minute
 	maxWarmConnections      = 5
+	appSchemaName           = "public"
+	appMigrationsTable      = "schema_migrations"
+	defaultConnectTimeout   = 10
 
 	captureSelectColumns       = "id,user_id,captured_at,source_app,source_title,ocr_text,summary,tag,fields_json"
 	recentCaptureSelectColumns = "id,user_id,captured_at,source_app,source_title,summary,tag,fields_json"
@@ -146,9 +150,10 @@ func NewPostgresStore(
 		return nil, fmt.Errorf("postgres dsn is required")
 	}
 
-	if err := runMigrations(dsn); err != nil {
+	if err := RunPostgresMigrations(dsn); err != nil {
 		return nil, err
 	}
+	dsn = normalizePostgresDSN(dsn)
 
 	maxOpenConns, maxIdleConns, connMaxLife = normalizePoolSettings(maxOpenConns, maxIdleConns, connMaxLife)
 
@@ -211,7 +216,10 @@ func runMigrations(dsn string) error {
 	}
 	defer rawDB.Close()
 
-	driver, err := postgres.WithInstance(rawDB, &postgres.Config{})
+	driver, err := postgres.WithInstance(rawDB, &postgres.Config{
+		SchemaName:      appSchemaName,
+		MigrationsTable: appMigrationsTable,
+	})
 	if err != nil {
 		return fmt.Errorf("create migration db driver: %w", err)
 	}
@@ -239,6 +247,31 @@ func runMigrations(dsn string) error {
 	}
 
 	return nil
+}
+
+func RunPostgresMigrations(dsn string) error {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return fmt.Errorf("postgres dsn is required")
+	}
+	return runMigrations(normalizePostgresDSN(dsn))
+}
+
+func normalizePostgresDSN(dsn string) string {
+	parsed, err := url.Parse(dsn)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return dsn
+	}
+
+	query := parsed.Query()
+	if strings.TrimSpace(query.Get("search_path")) == "" {
+		query.Set("search_path", appSchemaName)
+	}
+	if strings.TrimSpace(query.Get("connect_timeout")) == "" {
+		query.Set("connect_timeout", fmt.Sprintf("%d", defaultConnectTimeout))
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func normalizePoolSettings(maxOpenConns, maxIdleConns int, connMaxLife time.Duration) (int, int, time.Duration) {

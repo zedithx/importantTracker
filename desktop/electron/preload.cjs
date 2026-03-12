@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
   captureScreenForSelection: () => ipcRenderer.invoke('capture-screen-selection'),
   getAppInfo: () => ipcRenderer.invoke('app:get-info'),
+  logEvent: (entry) => ipcRenderer.send('log:event', entry),
   updateCaptureShortcut: (shortcut) =>
     ipcRenderer.invoke('shortcut:update', shortcut),
   onCaptureShortcut: (callback) => {

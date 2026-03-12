@@ -5,16 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"importanttracker/backend/internal/ai"
 	"importanttracker/backend/internal/auth"
 	"importanttracker/backend/internal/config"
+	"importanttracker/backend/internal/logging"
 	"importanttracker/backend/internal/model"
 	"importanttracker/backend/internal/service"
 	"importanttracker/backend/internal/store"
@@ -24,8 +26,16 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		fatalLog("failed_to_load_config", slog.String("error", err.Error()))
 	}
+	logger := logging.New(logging.Config{
+		AppEnv: cfg.AppEnv,
+		Level:  cfg.LogLevel,
+		Format: cfg.LogFormat,
+	})
+	logging.SetDefault(logger)
+	slog.Info("backend_starting", slog.String("addr", ":"+cfg.Port))
+	logStartupConfig(cfg)
 
 	captureStore, cleanupStore := initCaptureStore(cfg)
 	if cleanupStore != nil {
@@ -37,16 +47,24 @@ func main() {
 	svc := service.New(aiClient, captureStore, tgClient, cfg.TelegramDefaultChatID)
 	authManager, err := auth.NewManager(cfg.AuthJWTSecret, cfg.AuthTokenTTL)
 	if err != nil {
-		log.Fatalf("failed to initialize auth manager: %v", err)
+		fatalLog("failed_to_initialize_auth_manager", slog.String("error", err.Error()))
 	}
 
-	botUsername := ""
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
-	botUsername, err = tgClient.GetBotUsername(ctx)
-	cancel()
-	if err != nil {
-		log.Printf("telegram getMe failed: %v", err)
-	}
+	var botUsername atomic.Value
+	botUsername.Store("")
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+		defer cancel()
+
+		username, err := tgClient.GetBotUsername(ctx)
+		if err != nil {
+			slog.Warn("telegram_get_me_failed", slog.String("error", err.Error()))
+			return
+		}
+		botUsername.Store(username)
+		slog.Info("telegram_bot_metadata_loaded", slog.String("bot_username", username))
+	}()
 
 	startTelegramLinkWatcher(tgClient, svc)
 
@@ -328,7 +346,7 @@ func main() {
 			"user_id":      link.UserID,
 			"status":       link.Status,
 			"created_at":   link.CreatedAt,
-			"bot_username": botUsername,
+			"bot_username": botUsername.Load(),
 		})
 	})
 
@@ -404,22 +422,22 @@ func main() {
 	writeTimeout := maxDuration(cfg.RequestTimeout, cfg.AIRequestTimeout) + 10*time.Second
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withCORS(mux),
+		Handler:      withRequestLogging(withRecovery(withCORS(mux)), authManager),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: writeTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 
-	log.Printf("SnapRecall backend running on %s", addr)
+	slog.Info("backend_listening", slog.String("addr", addr))
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("server failed: %v", err)
+		fatalLog("server_listen_failed", slog.String("error", err.Error()))
 	}
 }
 
 func initCaptureStore(cfg *config.Config) (service.CaptureStore, func()) {
 	dsn := strings.TrimSpace(cfg.PostgresDSN)
 	if dsn == "" {
-		log.Printf("storage: using in-memory store")
+		logStorageSelection("memory")
 		return store.NewMemoryStore(), nil
 	}
 
@@ -434,19 +452,25 @@ func initCaptureStore(cfg *config.Config) (service.CaptureStore, func()) {
 		cfg.PostgresConnMaxLife,
 	)
 	if err != nil {
-		log.Fatalf("storage: failed to initialize postgres store: %v", err)
+		fatalLog(
+			"storage_initialization_failed",
+			slog.String("driver", "postgres"),
+			slog.String("target", connectionSummary(dsn)),
+			slog.String("error", err.Error()),
+		)
 	}
 
-	log.Printf("storage: using postgres store")
+	logStorageSelection("postgres", slog.String("target", connectionSummary(dsn)))
 	return pgStore, func() {
 		if err := pgStore.Close(); err != nil {
-			log.Printf("storage: close postgres store failed: %v", err)
+			slog.Warn("storage_close_failed", slog.String("driver", "postgres"), slog.String("error", err.Error()))
 		}
 	}
 }
 
 func startTelegramLinkWatcher(tgClient *telegram.Client, svc *service.Service) {
 	go func() {
+		slog.Info("telegram_link_watcher_started")
 		var offset int64 = 0
 
 		for {
@@ -454,12 +478,15 @@ func startTelegramLinkWatcher(tgClient *telegram.Client, svc *service.Service) {
 			updates, nextOffset, err := tgClient.GetUpdates(ctx, offset, 10)
 			cancel()
 			if err != nil {
-				log.Printf("telegram update poll failed: %v", err)
+				slog.Warn("telegram_update_poll_failed", slog.String("error", err.Error()))
 				time.Sleep(3 * time.Second)
 				continue
 			}
 
 			offset = nextOffset
+			if len(updates) > 0 {
+				slog.Debug("telegram_updates_received", formatCount("update", len(updates)), slog.Int64("next_offset", nextOffset))
+			}
 
 			for _, update := range updates {
 				if update.Message == nil {
@@ -474,6 +501,7 @@ func startTelegramLinkWatcher(tgClient *telegram.Client, svc *service.Service) {
 				chatID := telegram.ChatIDToString(update.Message.Chat.ID)
 				link, linked := svc.TryCompleteTelegramLink(text, chatID)
 				if linked {
+					slog.Info("telegram_link_completed", slog.String("event_id", link.EventID), slog.String("chat_id", logging.MaskChatID(chatID)))
 					reply := fmt.Sprintf(
 						"SnapRecall connected successfully for event %s. You can return to the desktop app.",
 						link.EventID,
@@ -489,6 +517,7 @@ func startTelegramLinkWatcher(tgClient *telegram.Client, svc *service.Service) {
 					continue
 				}
 
+				slog.Info("telegram_question_handled", slog.String("chat_id", logging.MaskChatID(chatID)))
 				_ = tgClient.SendTextMessage(context.Background(), chatID, reply)
 			}
 		}

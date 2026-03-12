@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { appLogger, maskEmail, summarizeError } from './logger'
+import TelegramSetupDialog from './components/TelegramSetupDialog'
 
 const DEFAULT_BACKEND_URL = normalizeBackendURL(
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
@@ -206,10 +208,72 @@ function clearAuthSession() {
 
 function formatFetchError(err, backendURL) {
   const message = String(err?.message || err || '')
-  if (message.toLowerCase().includes('failed to fetch')) {
+  const normalized = message.toLowerCase()
+  if (
+    normalized.includes('cannot reach backend') ||
+    normalized.includes('failed to fetch') ||
+    normalized.includes('load failed') ||
+    normalized.includes('networkerror') ||
+    normalized.includes('network request failed')
+  ) {
     return getBackendDownHint(backendURL)
   }
   return message || 'Request failed.'
+}
+
+function isBackendConnectionMessage(message) {
+  const normalized = String(message || '').trim().toLowerCase()
+  return normalized.includes('cannot reach backend')
+}
+
+function extractErrorMessage(rawError, backendURL, fallbackMessage = 'Something went wrong.') {
+  const message = formatFetchError(rawError, backendURL)
+  return String(message || fallbackMessage).trim() || fallbackMessage
+}
+
+async function fetchJSONWithLogging(url, options = {}, event, meta = {}) {
+  const method = String(options?.method || 'GET').toUpperCase()
+  const startedAt = Date.now()
+
+  appLogger.info(`${event}_request`, {
+    url,
+    method,
+    ...meta
+  })
+
+  try {
+    const res = await fetch(url, options)
+    const text = await res.text()
+    let data = null
+
+    if (text) {
+      try {
+        data = JSON.parse(text)
+      } catch {
+        data = { raw: text.slice(0, 300) }
+      }
+    }
+
+    appLogger.info(`${event}_response`, {
+      url,
+      method,
+      status: res.status,
+      ok: res.ok,
+      duration_ms: Date.now() - startedAt,
+      ...meta
+    })
+
+    return { res, data }
+  } catch (err) {
+    appLogger.error(`${event}_failed`, {
+      url,
+      method,
+      duration_ms: Date.now() - startedAt,
+      error: summarizeError(err),
+      ...meta
+    })
+    throw err
+  }
 }
 
 function classifyStatusTone(status) {
@@ -493,6 +557,10 @@ function resolveScreen(authUser, isCheckingAuth) {
 function App() {
   const backendURL = DEFAULT_BACKEND_URL
   const regionSurfaceRef = useRef(null)
+  const lastErrorFingerprintRef = useRef({
+    value: '',
+    shownAt: 0
+  })
 
   const [authToken, setAuthToken] = useState(() => {
     return window.localStorage.getItem(AUTH_TOKEN_KEY) || ''
@@ -505,6 +573,7 @@ function App() {
   const [isCheckingAuth, setIsCheckingAuth] = useState(Boolean(authToken))
 
   const [status, setStatus] = useState('Ready')
+  const [errorPopup, setErrorPopup] = useState(null)
   const [question, setQuestion] = useState('')
   const [queryResult, setQueryResult] = useState(null)
   const [lastAskedQuestion, setLastAskedQuestion] = useState('')
@@ -517,6 +586,7 @@ function App() {
   const [isStartingTelegramLink, setIsStartingTelegramLink] = useState(false)
   const [isCheckingTelegramLink, setIsCheckingTelegramLink] = useState(false)
   const [isDisconnectingTelegram, setIsDisconnectingTelegram] = useState(false)
+  const [isTelegramSetupOpen, setIsTelegramSetupOpen] = useState(false)
 
   const [shortcut, setShortcut] = useState('CommandOrControl+Shift+S')
   const [shortcutDraft, setShortcutDraft] = useState('CommandOrControl+Shift+S')
@@ -540,7 +610,9 @@ function App() {
   const [telegramLinkStatus, setTelegramLinkStatus] = useState('not_linked')
   const [botUsername, setBotUsername] = useState('')
   const [autoSyncCaptures, setAutoSyncCaptures] = useState(true)
+  const [telegramIncludeSourceScreenshot, setTelegramIncludeSourceScreenshot] = useState(false)
   const [telegramQAMode, setTelegramQAMode] = useState(true)
+  const [telegramDailyDigest, setTelegramDailyDigest] = useState(false)
   const [autoCaptureOnShortcut, setAutoCaptureOnShortcut] = useState(true)
   const [showCaptureConfirmation, setShowCaptureConfirmation] = useState(true)
 
@@ -561,8 +633,18 @@ function App() {
 
   const statusTone = classifyStatusTone(status)
   const isTelegramLinked = telegramLinkStatus === 'linked'
+  const isTelegramLinkPending = telegramLinkStatus === 'pending'
   const showWorkspace = Boolean(authUser)
   const displayName = getDisplayName(authUser?.email)
+  const telegramBotHandle = botUsername ? `@${String(botUsername).replace(/^@+/, '')}` : '@SnapRecallBot'
+  const linkedTelegramAccountLabel = useMemo(() => {
+    const emailUser = String(authUser?.email || '').trim().split('@')[0] || ''
+    const normalized = emailUser.replace(/[^a-z0-9_]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase()
+    if (normalized) {
+      return `@${normalized}`
+    }
+    return `@${displayName.replace(/\s+/g, '_').toLowerCase()}`
+  }, [authUser?.email, displayName])
   const isRegionSelectorOpen = Boolean(regionCaptureImage)
   const hasValidRegionSelection = Boolean(
     regionSelection && regionSelection.width >= 8 && regionSelection.height >= 8
@@ -691,7 +773,7 @@ function App() {
       : 'No captures yet.'
     const syncSummary = isTelegramLinked
       ? 'Everything is synced with Telegram.'
-      : 'Connect Telegram in Settings for mobile recall.'
+      : 'Connect Telegram to unlock mobile recall.'
     return `${captureSummary} ${syncSummary}`
   }, [captureCount, isTelegramLinked])
   const dashboardStats = useMemo(
@@ -764,6 +846,56 @@ function App() {
     isUpdatingShortcut
   ])
 
+  const dismissErrorPopup = useCallback(() => {
+    setErrorPopup(null)
+  }, [])
+
+  const showErrorPopup = useCallback(
+    (title, rawError, options = {}) => {
+      const message = String(
+        options.message || extractErrorMessage(rawError, backendURL, options.fallbackMessage)
+      ).trim()
+      const detail = String(options.detail || '').trim()
+      const kind = options.kind || (isBackendConnectionMessage(message) ? 'backend' : 'general')
+      const fingerprint = `${title}|${message}|${detail}|${kind}`
+      const now = Date.now()
+
+      if (
+        lastErrorFingerprintRef.current.value === fingerprint &&
+        now - lastErrorFingerprintRef.current.shownAt < 5000
+      ) {
+        return message
+      }
+
+      lastErrorFingerprintRef.current = {
+        value: fingerprint,
+        shownAt: now
+      }
+
+      setErrorPopup({
+        id: now,
+        title: String(title || 'Unexpected error'),
+        message,
+        detail,
+        kind
+      })
+
+      return message
+    },
+    [backendURL]
+  )
+
+  const reportError = useCallback(
+    (title, rawError, options = {}) => {
+      const message = showErrorPopup(title, rawError, options)
+      if (!options.skipStatus) {
+        setStatus(options.statusMessage || `${title}: ${message}`)
+      }
+      return message
+    },
+    [showErrorPopup]
+  )
+
   const loadRecentCaptures = useCallback(async () => {
     if (!authUser) {
       setRecentCaptures([])
@@ -775,15 +907,26 @@ function App() {
 
     try {
       setIsLoadingCaptures(true)
-      const res = await fetch(`${backendURL}/v1/captures/recent?limit=40`, {
-        method: 'GET',
-        headers: {
-          ...authHeaders
+      const { res, data } = await fetchJSONWithLogging(
+        `${backendURL}/v1/captures/recent?limit=40`,
+        {
+          method: 'GET',
+          headers: {
+            ...authHeaders
+          }
+        },
+        'captures_recent',
+        {
+          user_id: authUser?.user_id || ''
         }
-      })
+      )
+      if (!res.ok) {
+        reportError('Failed to load captures', data?.error || `request failed (${res.status})`)
+        return
+      }
 
-      const data = await res.json()
-      if (!res.ok || !Array.isArray(data?.captures)) {
+      if (!Array.isArray(data?.captures)) {
+        reportError('Failed to load captures', 'Unexpected captures response from backend.')
         return
       }
 
@@ -808,12 +951,12 @@ function App() {
         setSelectedCaptureIDs([])
         captureSelectionAnchorRef.current = ''
       }
-    } catch {
-      // Keep existing view if fetch fails.
+    } catch (err) {
+      reportError('Failed to load captures', err)
     } finally {
       setIsLoadingCaptures(false)
     }
-  }, [authHeaders, authUser, backendURL])
+  }, [authHeaders, authUser, backendURL, reportError])
 
   const saveCaptureDataUrl = useCallback(
     async (dataUrl, sourceTitle) => {
@@ -826,16 +969,22 @@ function App() {
       }
 
       setStatus('Saving capture...')
-      const res = await fetch(`${backendURL}/v1/captures`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
+      appLogger.info('capture_save_started', { source_title: sourceTitle })
+      const { res, data } = await fetchJSONWithLogging(
+        `${backendURL}/v1/captures`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          },
+          body: JSON.stringify(payload)
         },
-        body: JSON.stringify(payload)
-      })
-
-      const data = await res.json()
+        'capture_save',
+        {
+          source_title: sourceTitle
+        }
+      )
       if (!res.ok) {
         throw new Error(data?.error || 'unknown error')
       }
@@ -861,15 +1010,22 @@ function App() {
     try {
       setIsSavingCapture(true)
       setStatus('Capturing full screen...')
+      appLogger.info('shortcut_capture_started', {
+        user_id: authUser?.user_id || '',
+        mode: 'full_screen'
+      })
       const dataUrl = await window.electronAPI.captureScreen()
       await saveCaptureDataUrl(dataUrl, 'Quick Capture')
       setStatus(showCaptureConfirmation ? CAPTURE_SUCCESS_STATUS : 'Ready')
     } catch (err) {
-      setStatus(`Capture failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('shortcut_capture_failed', {
+        error: summarizeError(err)
+      })
+      reportError('Capture failed', err)
     } finally {
       setIsSavingCapture(false)
     }
-  }, [authUser, backendURL, hasElectronAPI, saveCaptureDataUrl, showCaptureConfirmation])
+  }, [authUser, hasElectronAPI, reportError, saveCaptureDataUrl, showCaptureConfirmation])
 
   const closeRegionSelector = useCallback(() => {
     setRegionCaptureImage('')
@@ -891,6 +1047,9 @@ function App() {
     try {
       setIsSavingCapture(true)
       setStatus('Preparing region capture...')
+      appLogger.info('region_capture_started', {
+        user_id: authUser?.user_id || ''
+      })
 
       const captureMethod =
         window.electronAPI.captureScreenForSelection || window.electronAPI.captureScreen
@@ -905,11 +1064,14 @@ function App() {
       setSelectionDragStart(null)
       setStatus('Drag on the preview to choose a region.')
     } catch (err) {
-      setStatus(`Capture failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('region_capture_failed', {
+        error: summarizeError(err)
+      })
+      reportError('Capture failed', err)
     } finally {
       setIsSavingCapture(false)
     }
-  }, [authUser, backendURL, hasElectronAPI])
+  }, [authUser, hasElectronAPI, reportError])
 
   const onShortcutCapture = useCallback(async () => {
     setStatus('Shortcut triggered.')
@@ -1034,16 +1196,16 @@ function App() {
       closeRegionSelector()
       setStatus(showCaptureConfirmation ? CAPTURE_SUCCESS_STATUS : 'Ready')
     } catch (err) {
-      setStatus(`Capture failed: ${formatFetchError(err, backendURL)}`)
+      reportError('Capture failed', err)
     } finally {
       setIsSavingCapture(false)
     }
   }, [
-    backendURL,
     closeRegionSelector,
     hasValidRegionSelection,
     regionCaptureImage,
     regionSelection,
+    reportError,
     saveCaptureDataUrl,
     showCaptureConfirmation
   ])
@@ -1085,32 +1247,53 @@ function App() {
     async function validateAuthToken() {
       try {
         setIsCheckingAuth(true)
-        const res = await fetch(`${backendURL}/v1/auth/me`, {
-          method: 'GET',
-          headers: {
-            ...authHeaders
-          }
-        })
-        const data = await res.json()
+        const { res, data } = await fetchJSONWithLogging(
+          `${backendURL}/v1/auth/me`,
+          {
+            method: 'GET',
+            headers: {
+              ...authHeaders
+            }
+          },
+          'auth_me'
+        )
 
-        if (!res.ok || !data?.user) {
+        if (!res.ok) {
           if (!cancelled) {
-            clearAuthSession()
-            setAuthToken('')
-            setAuthUser(null)
+            if (res.status === 401 || res.status === 403) {
+              appLogger.warn('auth_session_invalidated')
+              clearAuthSession()
+              setAuthToken('')
+              setAuthUser(null)
+              setStatus('Session expired. Please sign in again.')
+            } else {
+              reportError('Session restore failed', data?.error || `request failed (${res.status})`)
+            }
+          }
+          return
+        }
+
+        if (!data?.user) {
+          if (!cancelled) {
+            reportError('Session restore failed', 'Received an invalid auth response from backend.')
           }
           return
         }
 
         if (!cancelled) {
+          appLogger.info('auth_session_restored', {
+            user_id: data.user.user_id,
+            email: maskEmail(data.user.email)
+          })
           setAuthUser(data.user)
           saveAuthSession(authToken, data.user)
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          clearAuthSession()
-          setAuthToken('')
-          setAuthUser(null)
+          appLogger.warn('auth_session_restore_failed', {
+            error: summarizeError(err)
+          })
+          reportError('Session restore failed', err)
         }
       } finally {
         if (!cancelled) {
@@ -1124,7 +1307,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [authHeaders, authToken, backendURL])
+  }, [authHeaders, authToken, backendURL, reportError])
 
   useEffect(() => {
     let unsubscribe = () => {}
@@ -1137,11 +1320,13 @@ function App() {
       try {
         const appInfo = await window.electronAPI.getAppInfo()
         if (appInfo?.captureShortcut) {
+          appLogger.info('app_info_loaded', { capture_shortcut: appInfo.captureShortcut })
           setShortcut(appInfo.captureShortcut)
           setShortcutDraft(appInfo.captureShortcut)
         }
-      } catch {
-        setStatus('Could not load app info.')
+      } catch (err) {
+        appLogger.warn('app_info_load_failed', { error: summarizeError(err) })
+        reportError('Could not load app info', err)
       }
 
       const unbindCapture = window.electronAPI.onCaptureShortcut(async () => {
@@ -1166,7 +1351,7 @@ function App() {
     return () => {
       unsubscribe()
     }
-  }, [hasElectronAPI, onShortcutCapture])
+  }, [hasElectronAPI, onShortcutCapture, reportError])
 
   useEffect(() => {
     if (!authToken || !authUser?.user_id) {
@@ -1180,23 +1365,36 @@ function App() {
     async function loadTelegramStatus() {
       try {
         setIsCheckingTelegramLink(true)
-        const res = await fetch(`${backendURL}/v1/integrations/telegram/me`, {
-          method: 'GET',
-          headers: {
-            ...authHeaders
+        const { data } = await fetchJSONWithLogging(
+          `${backendURL}/v1/integrations/telegram/me`,
+          {
+            method: 'GET',
+            headers: {
+              ...authHeaders
+            }
+          },
+          'telegram_me',
+          {
+            user_id: authUser?.user_id || ''
           }
-        })
-        const data = await res.json()
+        )
 
         if (!cancelled) {
           const nextStatus = data?.status || 'not_linked'
+          appLogger.info('telegram_status_loaded', {
+            user_id: authUser?.user_id || '',
+            status: nextStatus
+          })
           setTelegramLinkStatus(nextStatus)
           if (nextStatus === 'linked') {
             setTelegramEventID('')
           }
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
+          appLogger.warn('telegram_status_load_failed', {
+            error: summarizeError(err)
+          })
           setTelegramLinkStatus('not_linked')
         }
       } finally {
@@ -1220,28 +1418,38 @@ function App() {
 
     const timer = window.setInterval(async () => {
       try {
-        const res = await fetch(
+        const { res, data } = await fetchJSONWithLogging(
           `${backendURL}/v1/integrations/telegram/status?event_id=${encodeURIComponent(telegramEventID)}`,
           {
             method: 'GET',
             headers: {
               ...authHeaders
             }
+          },
+          'telegram_status_poll',
+          {
+            event_id: telegramEventID
           }
         )
         if (!res.ok) {
           return
         }
 
-        const data = await res.json()
         if (data?.status) {
           setTelegramLinkStatus(data.status)
           if (data.status === 'linked') {
+            appLogger.info('telegram_link_completed', {
+              event_id: telegramEventID
+            })
             setStatus('Telegram linked successfully.')
             await loadRecentCaptures()
           }
         }
-      } catch {
+      } catch (err) {
+        appLogger.debug('telegram_status_poll_failed', {
+          event_id: telegramEventID,
+          error: summarizeError(err)
+        })
         // Keep polling while pending.
       }
     }, 3000)
@@ -1309,6 +1517,39 @@ function App() {
     }
   }, [displayScreen, targetScreen])
 
+  useEffect(() => {
+    function onWindowError(event) {
+      if (!event?.error && !event?.message) {
+        return
+      }
+
+      const location =
+        event?.filename && event?.lineno
+          ? `${event.filename}:${event.lineno}${event.colno ? `:${event.colno}` : ''}`
+          : ''
+
+      reportError('Unexpected app error', event.error || event.message || 'Unexpected app error.', {
+        fallbackMessage: 'Unexpected app error.',
+        detail: location
+      })
+    }
+
+    function onUnhandledRejection(event) {
+      reportError('Unexpected app error', event.reason || 'Unhandled promise rejection.', {
+        fallbackMessage: 'Unhandled promise rejection.'
+      })
+      event.preventDefault?.()
+    }
+
+    window.addEventListener('error', onWindowError)
+    window.addEventListener('unhandledrejection', onUnhandledRejection)
+
+    return () => {
+      window.removeEventListener('error', onWindowError)
+      window.removeEventListener('unhandledrejection', onUnhandledRejection)
+    }
+  }, [reportError])
+
   async function onAuthSubmit(event) {
     event.preventDefault()
 
@@ -1322,20 +1563,40 @@ function App() {
     try {
       setIsAuthenticating(true)
       setStatus(authMode === 'register' ? 'Creating account...' : 'Logging in...')
-
-      const endpoint = authMode === 'register' ? '/v1/auth/register' : '/v1/auth/login'
-      const res = await fetch(`${backendURL}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+      appLogger.info('auth_submit_started', {
+        mode: authMode,
+        email: maskEmail(email)
       })
 
-      const data = await res.json()
+      const endpoint = authMode === 'register' ? '/v1/auth/register' : '/v1/auth/login'
+      const { res, data } = await fetchJSONWithLogging(
+        `${backendURL}${endpoint}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        },
+        'auth_submit',
+        {
+          mode: authMode,
+          email: maskEmail(email)
+        }
+      )
       if (!res.ok || !data?.token || !data?.user) {
-        setStatus(`Auth failed: ${data?.error || 'unknown error'}`)
+        appLogger.warn('auth_submit_rejected', {
+          mode: authMode,
+          email: maskEmail(email),
+          error: data?.error || 'unknown error'
+        })
+        reportError('Auth failed', data?.error || 'unknown error')
         return
       }
 
+      appLogger.info('auth_submit_succeeded', {
+        mode: authMode,
+        user_id: data.user.user_id,
+        email: maskEmail(data.user.email)
+      })
       setAuthToken(data.token)
       setAuthUser(data.user)
       setAuthPassword('')
@@ -1344,19 +1605,29 @@ function App() {
       saveAuthSession(data.token, data.user)
       setStatus(authMode === 'register' ? 'Account created and logged in.' : 'Logged in.')
     } catch (err) {
-      setStatus(`Auth failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('auth_submit_failed', {
+        mode: authMode,
+        email: maskEmail(email),
+        error: summarizeError(err)
+      })
+      reportError('Auth failed', err)
     } finally {
       setIsAuthenticating(false)
     }
   }
 
   function onLogout() {
+    appLogger.info('auth_logout', {
+      user_id: authUser?.user_id || '',
+      email: maskEmail(authUser?.email || '')
+    })
     clearAuthSession()
     setAuthToken('')
     setAuthUser(null)
     setAuthPassword('')
     setQuestion('')
     setLastAskedQuestion('')
+    setIsTelegramSetupOpen(false)
     setTelegramEventID('')
     setTelegramLinkStatus('not_linked')
     setRecentCaptures([])
@@ -1386,17 +1657,27 @@ function App() {
 
     try {
       setIsUpdatingShortcut(true)
+      appLogger.info('shortcut_update_started', { shortcut: next })
       const result = await window.electronAPI.updateCaptureShortcut(next)
       if (!result?.ok) {
-        setStatus(result?.error || 'Shortcut update failed.')
+        appLogger.warn('shortcut_update_rejected', {
+          shortcut: next,
+          error: result?.error || 'unknown error'
+        })
+        reportError('Shortcut update failed', result?.error || 'unknown error')
         return
       }
 
+      appLogger.info('shortcut_update_succeeded', { shortcut: result.shortcut })
       setShortcut(result.shortcut)
       setShortcutDraft(result.shortcut)
       setStatus(`Capture shortcut updated to ${result.shortcut}.`)
     } catch (err) {
-      setStatus(`Shortcut update failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('shortcut_update_failed', {
+        shortcut: next,
+        error: summarizeError(err)
+      })
+      reportError('Shortcut update failed', err)
     } finally {
       setIsUpdatingShortcut(false)
     }
@@ -1411,19 +1692,30 @@ function App() {
     try {
       setIsStartingTelegramLink(true)
       setStatus('Preparing Telegram connection...')
-
-      const res = await fetch(`${backendURL}/v1/integrations/telegram/start`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
-        },
-        body: JSON.stringify({})
+      appLogger.info('telegram_link_start_requested', {
+        user_id: authUser?.user_id || ''
       })
 
-      const data = await res.json()
+      const { res, data } = await fetchJSONWithLogging(
+        `${backendURL}/v1/integrations/telegram/start`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          },
+          body: JSON.stringify({})
+        },
+        'telegram_link_start',
+        {
+          user_id: authUser?.user_id || ''
+        }
+      )
       if (!res.ok) {
-        setStatus(`Telegram integration failed: ${data.error || 'unknown error'}`)
+        appLogger.warn('telegram_link_start_rejected', {
+          error: data.error || 'unknown error'
+        })
+        reportError('Telegram integration failed', data?.error || 'unknown error')
         return
       }
 
@@ -1431,6 +1723,11 @@ function App() {
       setTelegramEventID(data.event_id || '')
       setTelegramLinkStatus(nextStatus)
       setBotUsername(data.bot_username || '')
+      appLogger.info('telegram_link_start_succeeded', {
+        user_id: authUser?.user_id || '',
+        status: nextStatus,
+        event_id: data.event_id || ''
+      })
 
       if (nextStatus === 'linked') {
         setStatus('Telegram is already linked for this account.')
@@ -1438,7 +1735,10 @@ function App() {
         setStatus('Telegram event ID ready. Send it to your bot to complete linking.')
       }
     } catch (err) {
-      setStatus(`Telegram integration failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('telegram_link_start_failed', {
+        error: summarizeError(err)
+      })
+      reportError('Telegram integration failed', err)
     } finally {
       setIsStartingTelegramLink(false)
     }
@@ -1451,18 +1751,21 @@ function App() {
 
     try {
       setIsCheckingTelegramLink(true)
-      const res = await fetch(
+      const { res, data } = await fetchJSONWithLogging(
         `${backendURL}/v1/integrations/telegram/status?event_id=${encodeURIComponent(telegramEventID)}`,
         {
           method: 'GET',
           headers: {
             ...authHeaders
           }
+        },
+        'telegram_status_check',
+        {
+          event_id: telegramEventID
         }
       )
-      const data = await res.json()
       if (!res.ok) {
-        setStatus(`Telegram status check failed: ${data.error || 'unknown error'}`)
+        reportError('Telegram status check failed', data?.error || 'unknown error')
         return
       }
 
@@ -1475,7 +1778,11 @@ function App() {
         }
       }
     } catch (err) {
-      setStatus(`Telegram status check failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('telegram_status_check_failed', {
+        event_id: telegramEventID,
+        error: summarizeError(err)
+      })
+      reportError('Telegram status check failed', err)
     } finally {
       setIsCheckingTelegramLink(false)
     }
@@ -1490,24 +1797,36 @@ function App() {
     try {
       setIsDisconnectingTelegram(true)
       setStatus('Disconnecting Telegram...')
-
-      const res = await fetch(`${backendURL}/v1/integrations/telegram/disconnect`, {
-        method: 'POST',
-        headers: {
-          ...authHeaders
+      const { res, data } = await fetchJSONWithLogging(
+        `${backendURL}/v1/integrations/telegram/disconnect`,
+        {
+          method: 'POST',
+          headers: {
+            ...authHeaders
+          }
+        },
+        'telegram_disconnect',
+        {
+          user_id: authUser?.user_id || ''
         }
-      })
-      const data = await res.json()
+      )
       if (!res.ok) {
-        setStatus(`Telegram disconnect failed: ${data.error || 'unknown error'}`)
+        reportError('Telegram disconnect failed', data?.error || 'unknown error')
         return
       }
 
+      appLogger.info('telegram_disconnect_succeeded', {
+        user_id: authUser?.user_id || '',
+        disconnected: Boolean(data?.disconnected)
+      })
       setTelegramEventID('')
       setTelegramLinkStatus('not_linked')
       setStatus(data?.disconnected ? 'Telegram disconnected.' : 'Telegram was already disconnected.')
     } catch (err) {
-      setStatus(`Telegram disconnect failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('telegram_disconnect_failed', {
+        error: summarizeError(err)
+      })
+      reportError('Telegram disconnect failed', err)
     } finally {
       setIsDisconnectingTelegram(false)
     }
@@ -1528,31 +1847,49 @@ function App() {
     try {
       setIsAsking(true)
       setStatus('Asking SnapRecall...')
-
-      const res = await fetch(`${backendURL}/v1/query`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
-        },
-        body: JSON.stringify({
-          question: normalizedQuestion
-        })
+      appLogger.info('recall_question_started', {
+        user_id: authUser?.user_id || '',
+        question: normalizedQuestion
       })
 
-      const data = await res.json()
+      const { res, data } = await fetchJSONWithLogging(
+        `${backendURL}/v1/query`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          },
+          body: JSON.stringify({
+            question: normalizedQuestion
+          })
+        },
+        'recall_question',
+        {
+          user_id: authUser?.user_id || ''
+        }
+      )
       if (!res.ok) {
-        setStatus(`Ask failed: ${data.error || 'unknown error'}`)
+        reportError('Ask failed', data?.error || 'unknown error')
         return
       }
 
+      appLogger.info('recall_question_succeeded', {
+        user_id: authUser?.user_id || '',
+        source_capture_id: data?.source_capture_id || '',
+        confidence: data?.confidence
+      })
       setQueryResult(data)
       setLastAskedQuestion(normalizedQuestion)
       setQuestion('')
       setStatus('Answer ready.')
       setActiveTab(TAB_KEYS.RECALL)
     } catch (err) {
-      setStatus(`Ask failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('recall_question_failed', {
+        user_id: authUser?.user_id || '',
+        error: summarizeError(err)
+      })
+      reportError('Ask failed', err)
     } finally {
       setIsAsking(false)
     }
@@ -1570,15 +1907,42 @@ function App() {
 
   async function onCopyEventID() {
     if (!telegramEventID) {
-      return
+      return false
     }
 
     try {
       await navigator.clipboard.writeText(telegramEventID)
+      appLogger.info('telegram_event_id_copied', { event_id: telegramEventID })
       setStatus('Event ID copied.')
-    } catch {
+      return true
+    } catch (err) {
+      appLogger.warn('telegram_event_id_copy_failed', {
+        error: summarizeError(err)
+      })
       setStatus('Copy failed. You can copy the code manually.')
+      return false
     }
+  }
+
+  function openTelegramSetup() {
+    if (!authUser) {
+      setStatus('Please log in to connect Telegram.')
+      return
+    }
+
+    setIsTelegramSetupOpen(true)
+    if (!isTelegramLinked && !isTelegramLinkPending && !isStartingTelegramLink) {
+      void onStartTelegramLink()
+    }
+  }
+
+  function closeTelegramSetup() {
+    setIsTelegramSetupOpen(false)
+  }
+
+  function onCompleteTelegramSetup() {
+    setIsTelegramSetupOpen(false)
+    setStatus('Telegram setup saved.')
   }
 
   const onToggleCaptureSelection = useCallback(
@@ -1756,19 +2120,30 @@ function App() {
     try {
       setIsDeletingCapture(true)
       setStatus(targetCaptureIDs.length > 1 ? `Deleting ${targetCaptureIDs.length} captures...` : 'Deleting capture...')
+      appLogger.info('capture_delete_started', {
+        user_id: authUser?.user_id || '',
+        capture_count: targetCaptureIDs.length
+      })
 
       const deletedCaptureIDs = []
       const failedDeletes = []
 
       for (const captureID of targetCaptureIDs) {
         try {
-          const res = await fetch(`${backendURL}/v1/captures/${encodeURIComponent(captureID)}`, {
-            method: 'DELETE',
-            headers: {
-              ...authHeaders
+          const { res, data } = await fetchJSONWithLogging(
+            `${backendURL}/v1/captures/${encodeURIComponent(captureID)}`,
+            {
+              method: 'DELETE',
+              headers: {
+                ...authHeaders
+              }
+            },
+            'capture_delete',
+            {
+              capture_id: captureID,
+              user_id: authUser?.user_id || ''
             }
-          })
-          const data = await res.json()
+          )
           if (!res.ok) {
             failedDeletes.push(data?.error || `request failed (${res.status})`)
             continue
@@ -1781,7 +2156,11 @@ function App() {
 
       if (!deletedCaptureIDs.length) {
         const firstFailure = failedDeletes[0] || 'unknown error'
-        setStatus(`Delete failed: ${firstFailure}`)
+        appLogger.warn('capture_delete_rejected', {
+          user_id: authUser?.user_id || '',
+          error: firstFailure
+        })
+        reportError('Delete failed', firstFailure)
         return
       }
 
@@ -1806,6 +2185,11 @@ function App() {
       }
 
       await loadRecentCaptures()
+      appLogger.info('capture_delete_succeeded', {
+        user_id: authUser?.user_id || '',
+        deleted_count: deletedCaptureIDs.length,
+        failed_count: failedDeletes.length
+      })
 
       if (failedDeletes.length) {
         setStatus(`Deleted ${deletedCaptureIDs.length}. Failed ${failedDeletes.length}.`)
@@ -1815,10 +2199,49 @@ function App() {
         setStatus('Capture deleted.')
       }
     } catch (err) {
-      setStatus(`Delete failed: ${formatFetchError(err, backendURL)}`)
+      appLogger.error('capture_delete_failed', {
+        user_id: authUser?.user_id || '',
+        error: summarizeError(err)
+      })
+      reportError('Delete failed', err)
     } finally {
       setIsDeletingCapture(false)
     }
+  }
+
+  function renderErrorPopup() {
+    if (!errorPopup) {
+      return null
+    }
+
+    const isBackendError = errorPopup.kind === 'backend'
+
+    return (
+      <div className="error-popup-stack" aria-live="assertive" aria-atomic="true">
+        <section className={`error-popup-card kind-${errorPopup.kind}`} role="alert">
+          <div className="error-popup-head">
+            <div className="error-popup-copy">
+              <span className="error-popup-label">
+                {isBackendError ? 'Backend connection issue' : 'Something went wrong'}
+              </span>
+              <h2>{errorPopup.title}</h2>
+            </div>
+            <button type="button" className="error-popup-dismiss" onClick={dismissErrorPopup}>
+              Dismiss
+            </button>
+          </div>
+          <p className="error-popup-message">{errorPopup.message}</p>
+          {errorPopup.detail ? <p className="error-popup-detail">{errorPopup.detail}</p> : null}
+          <div className="error-popup-footer">
+            <span>
+              {isBackendError
+                ? 'Start or reconnect the backend, then try the action again.'
+                : 'Review the message above, then retry when ready.'}
+            </span>
+          </div>
+        </section>
+      </div>
+    )
   }
 
   function renderLoadingScreen() {
@@ -2126,6 +2549,8 @@ function App() {
           ))}
         </div>
 
+        {renderTelegramIntegrationBanner()}
+
         <div className="dashboard-actions-grid">
           <button
             type="button"
@@ -2274,54 +2699,40 @@ function App() {
     if (isTelegramLinked) {
       return null
     }
-
-    const hasCode = Boolean(telegramEventID && telegramLinkStatus !== 'not_linked')
-    const botLink = botUsername ? `https://t.me/${botUsername}` : 'https://t.me'
+    const setupLabel = isStartingTelegramLink
+      ? 'Preparing...'
+      : isTelegramLinkPending
+        ? 'Continue setup'
+        : 'Connect Telegram'
+    const bannerCopy = isTelegramLinkPending
+      ? `Open ${telegramBotHandle}, send your verification code, and SnapRecall will link automatically.`
+      : 'Connect your Telegram to ask natural language questions like "When is my exam?" or "What\'s my flight number?" and get instant answers from your captured screenshots, anywhere.'
 
     return (
-      <section className="telegram-integration-banner">
+      <section className={`telegram-integration-banner ${isTelegramLinkPending ? 'is-pending' : ''}`}>
         <div className="telegram-integration-note">
           <div className="telegram-integration-icon">
             <img src={ICONS.telegramNotice} alt="" />
           </div>
           <div className="telegram-integration-copy">
-            <h2>Unlock Instant Recall via Telegram</h2>
-            <p>
-              Connect your Telegram to ask natural language questions like &quot;When is my exam?&quot; or
-              &quot;What&apos;s my flight number?&quot; and get instant answers from your captured screenshots,
-              anywhere.
-            </p>
+            <h2>{isTelegramLinkPending ? 'Finish Connecting Telegram' : 'Unlock Instant Recall via Telegram'}</h2>
+            <p>{bannerCopy}</p>
             <div className="telegram-integration-actions">
               <button
                 type="button"
                 className="telegram-integration-cta"
-                onClick={onStartTelegramLink}
+                onClick={openTelegramSetup}
                 disabled={isStartingTelegramLink || isCheckingTelegramLink || isDisconnectingTelegram}
               >
                 <img src={ICONS.telegramNoticeLink} alt="" />
-                <span>{isStartingTelegramLink ? 'Generating Event ID...' : 'Connect Telegram'}</span>
+                <span>{setupLabel}</span>
               </button>
-              <span className="telegram-integration-meta">Takes ~30 seconds</span>
+              <span className="telegram-integration-meta">
+                {isTelegramLinkPending ? 'Verification code ready' : 'Takes ~30 seconds'}
+              </span>
             </div>
           </div>
         </div>
-
-        {hasCode ? (
-          <div className="telegram-integration-code">
-            <code>{telegramEventID}</code>
-            <div className="telegram-integration-code-actions">
-              <a className="telegram-integration-open" href={botLink} target="_blank" rel="noreferrer">
-                Open bot
-              </a>
-              <button type="button" onClick={onCopyEventID}>
-                Copy code
-              </button>
-              <button type="button" onClick={onCheckTelegramStatus} disabled={isCheckingTelegramLink}>
-                {isCheckingTelegramLink ? 'Checking...' : 'Check link status'}
-              </button>
-            </div>
-          </div>
-        ) : null}
       </section>
     )
   }
@@ -2329,8 +2740,6 @@ function App() {
   function renderCapturesTab(titleText) {
     return (
       <div className="workspace-content">
-        {renderTelegramIntegrationBanner()}
-
         <div className="captures-header-row">
           <div>
             <h1 className="text-reveal text-delay-1">{titleText}</h1>
@@ -2504,9 +2913,21 @@ function App() {
   }
 
   function renderSettingsTab() {
-    const telegramPending = telegramLinkStatus === 'pending'
+    const telegramPending = isTelegramLinkPending
     const telegramConnected = isTelegramLinked
-    const telegramLinkLabel = botUsername ? `@${botUsername}` : '@SnapRecallBot'
+    const telegramStatusTitle = telegramConnected ? 'Bot connected' : telegramPending ? 'Link pending' : 'Bot not connected'
+    const telegramStatusDescription = telegramConnected
+      ? `${telegramBotHandle} · Linked to ${linkedTelegramAccountLabel} for mobile updates`
+      : telegramPending
+        ? `Finish linking ${telegramBotHandle} from the setup flow to unlock mobile recall`
+        : `Optional: connect ${telegramBotHandle} to sync captures and ask questions from Telegram`
+    const telegramSetupLabel = isStartingTelegramLink
+      ? 'Preparing...'
+      : telegramConnected
+        ? 'Manage'
+        : telegramPending
+          ? 'Resume setup'
+          : 'Connect'
 
     return (
       <div className="workspace-content settings-view">
@@ -2588,30 +3009,41 @@ function App() {
 
               <div className="settings-telegram-status-row">
                 <div className="settings-row-meta">
-                  <strong>{telegramConnected ? 'Bot connected' : 'Bot not connected'}</strong>
-                  <small>
-                    {telegramConnected
-                      ? `${telegramLinkLabel} · Linked to @${displayName.replace(/\s+/g, '_').toLowerCase()} for mobile updates`
-                      : `Optional: connect ${telegramLinkLabel} to sync captures and ask questions from Telegram`}
-                  </small>
+                  <strong>{telegramStatusTitle}</strong>
+                  <small>{telegramStatusDescription}</small>
                 </div>
 
-                {telegramConnected ? (
-                  <div className="settings-connected-chip">
-                    <img src={ICONS.settingsConnectedCheck} alt="" />
-                    <span>Connected</span>
-                  </div>
-                ) : (
+                <div className="settings-telegram-actions">
+                  {telegramConnected ? (
+                    <div className="settings-connected-chip">
+                      <img src={ICONS.settingsConnectedCheck} alt="" />
+                      <span>Connected</span>
+                    </div>
+                  ) : null}
                   <button
                     type="button"
                     className="settings-outline-btn settings-connect-btn"
-                    onClick={onStartTelegramLink}
+                    onClick={openTelegramSetup}
                     disabled={isStartingTelegramLink || isCheckingTelegramLink || isDisconnectingTelegram}
                   >
-                    {isStartingTelegramLink ? 'Generating...' : 'Connect'}
+                    {telegramSetupLabel}
                   </button>
-                )}
+                </div>
               </div>
+
+              {telegramPending ? (
+                <div className="settings-telegram-hint">
+                  <span className="dot off" />
+                  <small>Verification code is ready. Open setup to finish linking inside Telegram.</small>
+                </div>
+              ) : null}
+
+              {!telegramConnected ? (
+                <div className="settings-telegram-hint secondary">
+                  <span className="dot off" />
+                  <small>Setup takes about 30 seconds and gives you instant recall from your phone.</small>
+                </div>
+              ) : null}
 
               <div className="settings-toggle-row">
                 <span>Auto-sync captures</span>
@@ -2620,6 +3052,22 @@ function App() {
                   className={`settings-toggle ${autoSyncCaptures ? 'on' : ''}`}
                   onClick={() => setAutoSyncCaptures((prev) => !prev)}
                   aria-pressed={autoSyncCaptures}
+                  disabled={!telegramConnected}
+                >
+                  <span />
+                </button>
+              </div>
+
+              <div className="settings-toggle-row two-line">
+                <span className="settings-row-meta">
+                  <strong>Include source screenshot</strong>
+                  <small>Attach the original screenshot image alongside extracted facts</small>
+                </span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${telegramIncludeSourceScreenshot ? 'on' : ''}`}
+                  onClick={() => setTelegramIncludeSourceScreenshot((prev) => !prev)}
+                  aria-pressed={telegramIncludeSourceScreenshot}
                   disabled={!telegramConnected}
                 >
                   <span />
@@ -2642,17 +3090,21 @@ function App() {
                 </button>
               </div>
 
-              {telegramPending ? (
-                <div className="settings-event-row">
-                  <code>{telegramEventID}</code>
-                  <button type="button" onClick={onCopyEventID}>
-                    Copy
-                  </button>
-                  <button type="button" onClick={onCheckTelegramStatus} disabled={isCheckingTelegramLink}>
-                    {isCheckingTelegramLink ? 'Checking...' : 'Check'}
-                  </button>
-                </div>
-              ) : null}
+              <div className="settings-toggle-row two-line">
+                <span className="settings-row-meta">
+                  <strong>Daily digest</strong>
+                  <small>Receive a daily summary of upcoming events from your captures</small>
+                </span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${telegramDailyDigest ? 'on' : ''}`}
+                  onClick={() => setTelegramDailyDigest((prev) => !prev)}
+                  aria-pressed={telegramDailyDigest}
+                  disabled={!telegramConnected}
+                >
+                  <span />
+                </button>
+              </div>
 
               <div className="settings-card-divider">
                 <button
@@ -2853,14 +3305,21 @@ function App() {
             <button
               type="button"
               className={`telegram-footer ${isTelegramLinked ? 'is-linked' : 'is-unlinked'}`}
-              onClick={() => setActiveTab(TAB_KEYS.SETTINGS)}
+              onClick={openTelegramSetup}
             >
-              <span className="telegram-footer-status">
-                <span className={`dot ${isTelegramLinked ? 'on' : 'off'}`} />
-                <span>{isTelegramLinked ? 'Telegram connected' : 'Telegram optional integration'}</span>
+              <span className="telegram-footer-head">
+                <span className="telegram-footer-icon">
+                  <img src={ICONS.telegramNotice} alt="" />
+                </span>
+                <span className="telegram-footer-copy">
+                  <strong>{isTelegramLinked ? 'Telegram connected' : 'Connect Telegram'}</strong>
+                  <span>{isTelegramLinked ? 'Manage setup' : 'Mobile recall setup'}</span>
+                </span>
               </span>
               <small>
-                {isTelegramLinked ? 'Manage settings' : 'Get mobile summaries and recall chat in Settings'}
+                {isTelegramLinked
+                  ? `${telegramBotHandle} is ready for mobile recall and summaries.`
+                  : 'Ask questions in Telegram to instantly recall any captured fact.'}
               </small>
             </button>
           </aside>
@@ -2893,6 +3352,37 @@ function App() {
           </section>
         </div>
         {renderRegionCaptureSelector()}
+        {React.createElement(TelegramSetupDialog, {
+          open: isTelegramSetupOpen,
+          onClose: closeTelegramSetup,
+          onComplete: onCompleteTelegramSetup,
+          onPrepareLink: onStartTelegramLink,
+          onCheckStatus: onCheckTelegramStatus,
+          onCopyCode: onCopyEventID,
+          isLinked: isTelegramLinked,
+          isPreparing: isStartingTelegramLink,
+          isChecking: isCheckingTelegramLink,
+          eventId: telegramEventID,
+          botUsername,
+          linkedAccountLabel: linkedTelegramAccountLabel,
+          autoSyncCaptures,
+          onToggleAutoSyncCaptures: () => setAutoSyncCaptures((prev) => !prev),
+          includeSourceScreenshot: telegramIncludeSourceScreenshot,
+          onToggleIncludeSourceScreenshot: () => setTelegramIncludeSourceScreenshot((prev) => !prev),
+          qaMode: telegramQAMode,
+          onToggleQAMode: () => setTelegramQAMode((prev) => !prev),
+          dailyDigest: telegramDailyDigest,
+          onToggleDailyDigest: () => setTelegramDailyDigest((prev) => !prev),
+          icons: {
+            telegram: ICONS.telegramNotice,
+            bot: ICONS.telegram,
+            externalLink: ICONS.settingsExternalLink,
+            arrowRight: ICONS.arrowRight,
+            copy: ICONS.copy,
+            check: ICONS.check,
+            lock: ICONS.lock
+          }
+        })}
       </div>
     )
   }
@@ -2911,6 +3401,7 @@ function App() {
     <div className={`screen-transition-layer stage-${screenStage}`}>
       {renderActiveScreen()}
       {renderGlobalLoader()}
+      {renderErrorPopup()}
     </div>
   )
 }
